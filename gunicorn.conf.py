@@ -14,4 +14,4 @@ keepalive = int(os.getenv("PEERXIV_GUNICORN_KEEPALIVE", "5"))
 accesslog = "-"
 errorlog = "-"
 capture_output = True
-worker_tmp_dir = "/dev/shm"
+worker_tmp_dir = os.getenv("PEERXIV_GUNICORN_WORKER_TMP_DIR") or ("/dev/shm" if os.path.isdir("/dev/shm") else None)
