@@ -1,0 +1,21 @@
+{
+  "name": "peerxiv",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:vendor && npm run build:css",
+    "build:vendor": "node scripts/build_frontend.mjs",
+    "build:css": "tailwindcss -i client/templates/src/tailwind.input.css -o client/templates/src/tailwind.css --minify",
+    "test": "npm run test:ui",
+    "test:ui": "node --test tests/*.test.mjs"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.14",
+    "jsdom": "^26.1.0",
+    "tailwindcss": "^4.1.14"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.8.3"
+  }
+}

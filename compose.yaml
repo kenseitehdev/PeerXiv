@@ -1,0 +1,79 @@
+services:
+  app:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${PEERXIV_PORT:-8000}:8000"
+    environment:
+      PEERXIV_ENV: production
+      PEERXIV_SECRET_KEY: "${PEERXIV_SECRET_KEY:?Set PEERXIV_SECRET_KEY in .env}"
+      PEERXIV_TRUSTED_HOSTS: "${PEERXIV_TRUSTED_HOSTS:-localhost,127.0.0.1}"
+      PEERXIV_FRONTEND_ORIGINS: "${PEERXIV_FRONTEND_ORIGINS:-http://localhost:8000}"
+      PEERXIV_REGISTRATION_MODE: "${PEERXIV_REGISTRATION_MODE:-invite}"
+      PEERXIV_ALPHA_INVITE_CODE: "${PEERXIV_ALPHA_INVITE_CODE:?Set PEERXIV_ALPHA_INVITE_CODE in .env}"
+      DATABASE_URL: "postgresql+psycopg://peerxiv:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@db:5432/peerxiv"
+      REDIS_URL: redis://redis:6379/0
+      PEERXIV_MANUSCRIPT_STORAGE_ROOT: /data/manuscripts
+      PEERXIV_CLAMAV_HOST: clamav
+      PEERXIV_CLAMAV_PORT: "3310"
+      PEERXIV_MALWARE_SCAN_REQUIRED: "1"
+      PORT: "8000"
+    volumes:
+      - manuscripts:/data/manuscripts
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clamav:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=3)
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: peerxiv
+      POSTGRES_USER: peerxiv
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U peerxiv -d peerxiv"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav:1.5
+    restart: unless-stopped
+    volumes:
+      - clamav_signatures:/var/lib/clamav
+
+volumes:
+  clamav_signatures:
+  manuscripts:
+  postgres:
+  redis:

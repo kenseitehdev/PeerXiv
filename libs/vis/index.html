@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+	<title>✅ Vistera Test</title>
+	<style>
+		body { font-family: sans-serif; padding: 2rem; }
+		nav a { margin-right: 1rem; text-decoration: none; font-weight: bold; }
+		button { padding: 0.5rem 1rem; margin-top: 0.5rem; }
+	</style>
+</head>
+<body id="body">
+	<h1>🧪 Vistera Component Test</h1>
+	<nav>
+		<a href="/api/" data-link>Home</a>
+		<a href="/api/about" data-link>About</a>
+		<a href="/api/broken" data-link>Broken</a>
+	</nav>
+	<hr/>
+	<vistra-router></vistra-router>
+    <div id="app"></div>
+<script src="/VistraJS.js" type="module"></script>
+    <script type="module">
+    console.log("Script running");
+
+let counter = $.component.define({
+	name: "counter-box",
+	props: [],
+	template: `
+		<div>
+			<p>🔢 Counter: {{ count.value }}</p>
+			<button id="increment">➕ Increment</button>
+			<button id="decrement">➖ Decrement</button>
+			<button id="reset">🔁 Reset</button>
+		</div>
+	`,
+	onMount() {
+		const self = this;
+		self.count = $.reactive(0);
+
+		self.$watch(self.count, () => {
+
+			queueMicrotask(() => {
+				$.selector(self).find("#increment").on("click", () => self.count.value++);
+				$.selector(self).find("#decrement").on("click", () => self.count.value--);
+				$.selector(self).find("#reset").on("click", () => self.count.value = 0);
+			});
+            		self.update({ count: self.count.value });
+
+		});
+
+	}
+});
+
+const Home = $.component.define({
+	name: "home-page",
+	template: `
+		<h2 id="home">🏠 Home</h2>
+        <counter-box></counter-box>
+        
+	`
+});
+
+const About = $.component.define({
+	name: "about-page",
+	template: `
+		<h2>📖 About</h2>
+		<p>This is a Vistera test.</p>
+	`
+});
+
+const NotFound = $.component.define({
+	name: "not-found",
+	template: `
+		<h2>❌ 404</h2>
+		<p>Page not found.</p>
+	`
+});
+
+const router = $.router.create({
+	mode: "history", // or "hash"
+	target: "#app",
+	routes: {
+		"/api/": "home-page",
+		"/api/about": "about-page"
+	},
+	notFound: "not-found"
+});
+
+router.init();
+
+document.querySelectorAll('a[data-link]').forEach(link => {
+	const $link = $.selector(link); // Wrap in VSelector
+
+	$link.on("hover", () => {
+$link.css("toggle", { color: "crimson" });
+	});
+
+	link.addEventListener('click', e => {
+		e.preventDefault();
+		const path = link.getAttribute('href');
+		router.navigate(path);
+	});
+});
+console.log("JavaScript loaded successfully!");
+</script>
+</body>
+</html>
