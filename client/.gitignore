@@ -1,0 +1,12 @@
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store
+.env
+.env.ngrok
+.venv/
+instance/
+*.sqlite
+*.sqlite3
+client/uploads/
+.pytest_cache/
