@@ -13,9 +13,11 @@
   "devDependencies": {
     "@tailwindcss/cli": "^4.1.14",
     "jsdom": "^26.1.0",
-    "tailwindcss": "^4.1.14"
+    "tailwindcss": "^4.1.14",
+    "wrangler": "^4.128.0"
   },
   "dependencies": {
+    "@cloudflare/containers": "^0.3.7",
     "socket.io-client": "^4.8.3"
   }
 }
