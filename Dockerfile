@@ -1,19 +1,30 @@
-FROM python:3.13-slim
+FROM node:24-alpine AS frontend
+WORKDIR /build
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY scripts/build_frontend.mjs scripts/build_frontend.mjs
+COPY client/templates/src/tailwind.input.css client/templates/src/tailwind.input.css
+RUN npm run build
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-ENV PORT=8080
-
+FROM python:3.12-slim AS runtime
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PEERXIV_ENV=production \
+    PORT=8000
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt ./
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY client ./client
+COPY . .
+COPY --from=frontend /build/client/templates/src/tailwind.css /app/client/templates/src/tailwind.css
+COPY --from=frontend /build/client/templates/vendor/socket.io.esm.min.js /app/client/templates/vendor/socket.io.esm.min.js
+RUN addgroup --system peerxiv \
+    && adduser --system --ingroup peerxiv --home /nonexistent peerxiv \
+    && mkdir -p /data/manuscripts \
+    && chown -R peerxiv:peerxiv /data
 
-WORKDIR /app/client
-
-EXPOSE 8080
-
-CMD ["gunicorn", "--workers", "1", "--threads", "100", "--bind", "0.0.0.0:8080", "server:app"]
+USER peerxiv
+EXPOSE 8000
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

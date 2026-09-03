@@ -3,15 +3,14 @@
   "name": "peerxiv",
   "main": "cloudflare/worker.mjs",
   "compatibility_date": "2026-09-03",
-
   "containers": [
     {
       "class_name": "PeerXivContainer",
       "image": "./Dockerfile",
+      "instance_type": "basic",
       "max_instances": 1
     }
   ],
-
   "durable_objects": {
     "bindings": [
       {
@@ -20,11 +19,13 @@
       }
     ]
   },
-
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["PeerXivContainer"]
     }
-  ]
+  ],
+  "observability": {
+    "enabled": true
+  }
 }

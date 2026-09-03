@@ -10,3 +10,6 @@ instance/
 *.sqlite3
 client/uploads/
 .pytest_cache/
+.dev.vars
+.wrangler/
+.wrangler-dry-run/
