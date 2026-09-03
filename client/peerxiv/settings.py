@@ -45,6 +45,31 @@ class BaseConfig:
     API_VERSION = "v1"
     REGISTRATION_MODE = os.getenv("PEERXIV_REGISTRATION_MODE", "open").strip().casefold()
     ALPHA_INVITE_CODE = os.getenv("PEERXIV_ALPHA_INVITE_CODE", "")
+    ORCID_ENVIRONMENT = os.getenv("PEERXIV_ORCID_ENVIRONMENT", "sandbox").strip().casefold()
+    ORCID_CLIENT_ID = os.getenv("PEERXIV_ORCID_CLIENT_ID", "").strip()
+    ORCID_CLIENT_SECRET = os.getenv("PEERXIV_ORCID_CLIENT_SECRET", "").strip()
+    ORCID_REDIRECT_URI = os.getenv("PEERXIV_ORCID_REDIRECT_URI", "").strip()
+    ORCID_OAUTH_BASE_URL = (
+        "https://sandbox.orcid.org"
+        if ORCID_ENVIRONMENT == "sandbox"
+        else "https://orcid.org"
+    )
+    ORCID_AUTHORIZE_URL = f"{ORCID_OAUTH_BASE_URL}/oauth/authorize"
+    ORCID_TOKEN_URL = f"{ORCID_OAUTH_BASE_URL}/oauth/token"
+    ORCID_ENABLED = bool(ORCID_CLIENT_ID and ORCID_CLIENT_SECRET)
+    ORCID_TIMEOUT = float(os.getenv("PEERXIV_ORCID_TIMEOUT", "10"))
+    CREDENTIAL_ENCRYPTION_KEY = os.getenv("PEERXIV_CREDENTIAL_ENCRYPTION_KEY", "").strip()
+    ZENODO_ENVIRONMENT = os.getenv("PEERXIV_ZENODO_ENVIRONMENT", "sandbox").strip().casefold()
+    ZENODO_BASE_URL = (
+        "https://sandbox.zenodo.org"
+        if ZENODO_ENVIRONMENT == "sandbox"
+        else "https://zenodo.org"
+    )
+    ZENODO_ENABLED = bool(CREDENTIAL_ENCRYPTION_KEY)
+    ZENODO_TIMEOUT = float(os.getenv("PEERXIV_ZENODO_TIMEOUT", "30"))
+    ZENODO_ALLOW_PRODUCTION_PUBLISH = _bool_env(
+        "PEERXIV_ZENODO_ALLOW_PRODUCTION_PUBLISH"
+    )
     SECRET_KEY = os.getenv("PEERXIV_SECRET_KEY", DEVELOPMENT_SECRET)
     SQLALCHEMY_DATABASE_URI = _database_url()
     SQLALCHEMY_TRACK_MODIFICATIONS = False
@@ -152,6 +177,29 @@ def resolve_config(name: str | None = None):
 
 def validate_config(config: dict) -> None:
     """Fail fast on production defaults that would silently weaken a deployment."""
+
+    if str(config.get("ORCID_ENVIRONMENT") or "") not in {"sandbox", "production"}:
+        raise RuntimeError("PEERXIV_ORCID_ENVIRONMENT must be sandbox or production")
+    orcid_values = [
+        bool(config.get("ORCID_CLIENT_ID")),
+        bool(config.get("ORCID_CLIENT_SECRET")),
+    ]
+    if any(orcid_values) and not all(orcid_values):
+        raise RuntimeError(
+            "PEERXIV_ORCID_CLIENT_ID and PEERXIV_ORCID_CLIENT_SECRET must be configured together"
+        )
+    if str(config.get("ZENODO_ENVIRONMENT") or "") not in {"sandbox", "production"}:
+        raise RuntimeError("PEERXIV_ZENODO_ENVIRONMENT must be sandbox or production")
+    credential_key = str(config.get("CREDENTIAL_ENCRYPTION_KEY") or "")
+    if credential_key:
+        try:
+            from cryptography.fernet import Fernet
+
+            Fernet(credential_key.encode("ascii"))
+        except (ValueError, TypeError, UnicodeEncodeError) as error:
+            raise RuntimeError(
+                "PEERXIV_CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key"
+            ) from error
 
     if config.get("ENVIRONMENT") != "production":
         return

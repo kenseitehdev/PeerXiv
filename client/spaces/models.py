@@ -6,6 +6,34 @@ from uuid import uuid4
 from peerxiv.extensions import db
 
 
+SPACE_ROLE_PERMISSIONS: dict[str, tuple[str, ...]] = {
+    "owner": (
+        "view",
+        "edit_space",
+        "manage_members",
+        "manage_papers",
+        "manage_resources",
+        "write_files",
+        "review",
+    ),
+    "maintainer": (
+        "view",
+        "edit_space",
+        "manage_members",
+        "manage_papers",
+        "manage_resources",
+        "write_files",
+        "review",
+    ),
+    "editor": ("view", "edit_space", "manage_papers", "manage_resources", "write_files", "review"),
+    "contributor": ("view", "manage_resources", "write_files", "review"),
+    # Kept as an alias for records created by the 0.7 API.
+    "collaborator": ("view", "manage_resources", "write_files", "review"),
+    "reviewer": ("view", "review"),
+    "viewer": ("view",),
+}
+
+
 def new_id() -> str:
     return str(uuid4())
 
@@ -43,7 +71,20 @@ class ResearchSpace(db.Model):
         "SpaceResource", cascade="all, delete-orphan", lazy="selectin", back_populates="space"
     )
 
-    def to_dict(self) -> dict[str, object]:
+    def access_for(self, user_id: str | None) -> dict[str, object]:
+        if user_id is None:
+            return {"role": "public" if self.visibility == "public" else None, "permissions": ["view"] if self.visibility == "public" else []}
+        if user_id == self.owner_id:
+            role = "owner"
+        else:
+            membership = next((member for member in self.members if member.user_id == user_id), None)
+            role = membership.role if membership else ("public" if self.visibility == "public" else None)
+        permissions = list(SPACE_ROLE_PERMISSIONS.get(role or "", ()))
+        if role == "public":
+            permissions = ["view"]
+        return {"role": role, "permissions": permissions}
+
+    def to_dict(self, *, viewer_id: str | None = None) -> dict[str, object]:
         return {
             "id": self.id,
             "kind": self.kind,
@@ -58,6 +99,7 @@ class ResearchSpace(db.Model):
             "resources": [resource.to_dict() for resource in self.resources],
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+            "viewer_access": self.access_for(viewer_id),
         }
 
 
@@ -81,7 +123,13 @@ class SpaceMember(db.Model):
     user = db.relationship("Account", lazy="joined")
 
     def to_dict(self) -> dict[str, object]:
-        return {"user": self.user.to_dict(), "role": self.role, "joined_at": self.joined_at.isoformat()}
+        return {
+            "id": self.id,
+            "user": self.user.to_dict(),
+            "role": self.role,
+            "permissions": list(SPACE_ROLE_PERMISSIONS.get(self.role, ())),
+            "joined_at": self.joined_at.isoformat(),
+        }
 
 
 class SpacePaper(db.Model):

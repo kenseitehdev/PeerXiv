@@ -2,7 +2,10 @@
 
 import os
 
-bind = f"0.0.0.0:{os.getenv('PORT', '8000')}"
+bind = os.getenv(
+    "PEERXIV_GUNICORN_BIND",
+    f"0.0.0.0:{os.getenv('PORT', '8000')}",
+)
 worker_class = "gthread"
 # Gunicorn's built-in balancer is not sticky. Flask-SocketIO therefore requires
 # one worker per instance; scale with multiple instances behind a sticky proxy.
@@ -14,4 +17,11 @@ keepalive = int(os.getenv("PEERXIV_GUNICORN_KEEPALIVE", "5"))
 accesslog = "-"
 errorlog = "-"
 capture_output = True
-worker_tmp_dir = os.getenv("PEERXIV_GUNICORN_WORKER_TMP_DIR") or ("/dev/shm" if os.path.isdir("/dev/shm") else None)
+
+# Linux containers normally provide /dev/shm, but macOS does not. Allow an
+# explicit runtime directory and otherwise use /dev/shm only when it exists.
+# Gunicorn's default (None) remains the portable fallback.
+configured_worker_tmp_dir = os.getenv("PEERXIV_GUNICORN_WORKER_TMP_DIR", "").strip()
+worker_tmp_dir = configured_worker_tmp_dir or (
+    "/dev/shm" if os.path.isdir("/dev/shm") else None
+)

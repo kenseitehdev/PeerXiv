@@ -67,3 +67,13 @@ class PaperPublish(BaseModel):
     @classmethod
     def normalize_change_summary(cls, value):
         return clean_multiline(value)
+
+
+class DoiReserveInput(BaseModel):
+    no_existing_doi: bool = False
+
+
+class DoiPublishInput(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    confirmation: str = Field(min_length=1, max_length=255)

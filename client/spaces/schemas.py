@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, field_validator, model_validator
 
 from peerxiv.validation import clean_json, clean_multiline, clean_single_line, clean_string_list
 
@@ -81,13 +81,26 @@ class SpaceResourceCreate(BaseModel):
 
 
 class SpaceMemberCreate(BaseModel):
-    email: EmailStr
-    role: Literal["editor", "collaborator", "viewer"] = "collaborator"
+    account_id: str | None = Field(default=None, min_length=36, max_length=36)
+    email: EmailStr | None = None
+    role: Literal[
+        "maintainer", "editor", "contributor", "collaborator", "reviewer", "viewer"
+    ] = "contributor"
 
     @field_validator("email")
     @classmethod
     def normalize_email(cls, value):
-        return str(value).strip().casefold()
+        return str(value).strip().casefold() if value is not None else None
+
+    @model_validator(mode="after")
+    def require_target(self):
+        if bool(self.account_id) == bool(self.email):
+            raise ValueError("Provide exactly one of account_id or email")
+        return self
+
+
+class SpaceMemberUpdate(BaseModel):
+    role: Literal["maintainer", "editor", "contributor", "reviewer", "viewer"]
 
 
 class SpacePaperCreate(BaseModel):

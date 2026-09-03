@@ -1,8 +1,18 @@
+import runpy
+from pathlib import Path
+
 import pytest
 from sqlalchemy import text
 
 from peerxiv import create_app
 from peerxiv.extensions import db
+
+
+def test_gunicorn_bind_can_be_restricted_to_loopback(monkeypatch):
+    monkeypatch.setenv("PEERXIV_GUNICORN_BIND", "127.0.0.1:8123")
+    config = runpy.run_path(str(Path(__file__).parents[1] / "gunicorn.conf.py"))
+
+    assert config["bind"] == "127.0.0.1:8123"
 
 
 def test_production_rejects_unsafe_defaults():

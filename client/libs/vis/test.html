@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>JS Test</title>
+</head>
+<body>
+    <h1>Before JavaScript</h1>
+    
+    <script>
+        console.log("=== JAVASCRIPT IS RUNNING ===");
+        alert("JavaScript executed successfully!");
+        document.body.style.backgroundColor = "lightgreen";
+        
+        // Test basic DOM manipulation
+        const h1 = document.querySelector('h1');
+        h1.textContent = "JavaScript Changed This!";
+        h1.style.color = "red";
+        
+        // Add a new element
+        const p = document.createElement('p');
+        p.textContent = "This paragraph was created by JavaScript";
+        p.style.fontSize = "20px";
+        p.style.color = "blue";
+        document.body.appendChild(p);
+    </script>
+    
+    <h1>After JavaScript</h1>
+</body>
+</html>

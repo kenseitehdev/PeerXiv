@@ -93,6 +93,13 @@ class PaperVersion(db.Model):
         uselist=False,
         lazy="selectin",
     )
+    doi_record = db.relationship(
+        "PaperDoiRecord",
+        back_populates="paper_version",
+        cascade="all, delete-orphan",
+        uselist=False,
+        lazy="selectin",
+    )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -108,7 +115,81 @@ class PaperVersion(db.Model):
             "change_summary": self.change_summary,
             "published_at": self.published_at.isoformat(),
             "descriptive_metadata": self.metadata_record.to_dict() if self.metadata_record else None,
+            "doi": self.doi_record.to_dict() if self.doi_record else None,
         }
+
+
+class PaperDoiRecord(db.Model):
+    """Version-scoped DOI deposit and registration state.
+
+    Published ``PaperVersion`` rows are immutable.  This companion record
+    retains the provider transaction without putting mutable external state on
+    the scholarly version itself.
+    """
+
+    __tablename__ = "paper_doi_records"
+    __table_args__ = (
+        db.UniqueConstraint("paper_version_id", name="uq_paper_version_doi"),
+        db.UniqueConstraint("doi", name="uq_paper_doi"),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=new_id)
+    paper_version_id = db.Column(
+        db.String(36),
+        db.ForeignKey("paper_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_by_id = db.Column(
+        db.String(36), db.ForeignKey("accounts.id", ondelete="SET NULL"), index=True
+    )
+    provider = db.Column(db.String(40), nullable=False, default="zenodo", index=True)
+    environment = db.Column(db.String(24), nullable=False, index=True)
+    state = db.Column(db.String(32), nullable=False, default="metadata_ready", index=True)
+    doi = db.Column(db.String(255), index=True)
+    doi_url = db.Column(db.Text)
+    concept_doi = db.Column(db.String(255), index=True)
+    provider_record_id = db.Column(db.String(120), index=True)
+    provider_record_url = db.Column(db.Text)
+    landing_url = db.Column(db.Text, nullable=False)
+    metadata_hash = db.Column(db.String(128), nullable=False)
+    metadata_payload = db.Column(db.JSON, nullable=False)
+    manuscript_checksum = db.Column(db.String(128), nullable=False)
+    provider_payload = db.Column(db.JSON, nullable=False, default=dict)
+    last_error = db.Column(db.Text)
+    reserved_at = db.Column(db.DateTime(timezone=True), index=True)
+    published_at = db.Column(db.DateTime(timezone=True), index=True)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    paper_version = db.relationship("PaperVersion", back_populates="doi_record")
+    created_by = db.relationship("Account", lazy="joined")
+
+    def to_dict(self, *, include_error: bool = False) -> dict[str, object]:
+        result = {
+            "id": self.id,
+            "paper_version_id": self.paper_version_id,
+            "provider": self.provider,
+            "environment": self.environment,
+            "state": self.state,
+            "doi": self.doi,
+            "doi_url": self.doi_url,
+            "concept_doi": self.concept_doi,
+            "provider_record_id": self.provider_record_id,
+            "provider_record_url": self.provider_record_url,
+            "landing_url": self.landing_url,
+            "metadata_hash": self.metadata_hash,
+            "manuscript_checksum": self.manuscript_checksum,
+            "reserved_at": self.reserved_at.isoformat() if self.reserved_at else None,
+            "published_at": self.published_at.isoformat() if self.published_at else None,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+        if include_error:
+            result["last_error"] = self.last_error
+        return result
 
 
 class PaperMetadataRecord(db.Model):

@@ -1,3 +1,10 @@
+from datetime import timedelta
+
+from accounts.invitations import create_invitation
+from accounts.models import RegistrationInvite, utc_now
+from peerxiv.extensions import db
+
+
 def register(app, *, email, name):
     client = app.test_client()
     response = client.post(
@@ -92,6 +99,84 @@ def test_registration_can_be_disabled(app):
     )
     assert response.status_code == 403
     assert response.get_json()["error"]["code"] == "registration_disabled"
+
+
+def test_generated_invite_is_email_bound_single_use_and_hashed(app):
+    app.config.update(REGISTRATION_MODE="invite", ALPHA_INVITE_CODE="bootstrap-only-code")
+    with app.app_context():
+        invitation, code = create_invitation(
+            label="Maya alpha invitation",
+            email="maya.invited@example.com",
+            max_uses=1,
+            expires_at=utc_now() + timedelta(days=7),
+        )
+        invitation_id = invitation.id
+        assert invitation.code_digest != code
+        assert code not in invitation.to_dict().values()
+
+    base = {
+        "password": "correct-horse-battery-staple",
+        "display_name": "Maya Invited",
+        "role": "Researcher",
+        "invite_code": code,
+    }
+    wrong_email = app.test_client().post(
+        "/api/v1/accounts/register",
+        json={**base, "email": "someone-else@example.com"},
+    )
+    assert wrong_email.status_code == 403
+
+    accepted = app.test_client().post(
+        "/api/v1/accounts/register",
+        json={**base, "email": "maya.invited@example.com"},
+    )
+    assert accepted.status_code == 201
+
+    with app.app_context():
+        invitation = db.session.get(RegistrationInvite, invitation_id)
+        assert invitation.use_count == 1
+        assert invitation.status() == "used"
+
+    reused = app.test_client().post(
+        "/api/v1/accounts/register",
+        json={
+            **base,
+            "email": "maya.invited@example.com",
+            "display_name": "Maya Again",
+        },
+    )
+    assert reused.status_code == 403
+
+
+def test_invitation_cli_create_list_and_revoke(app):
+    runner = app.test_cli_runner()
+    created = runner.invoke(
+        args=[
+            "invites",
+            "create",
+            "--email",
+            "cli.invited@example.com",
+            "--days",
+            "3",
+        ]
+    )
+    assert created.exit_code == 0, created.output
+    code_line = next(line for line in created.output.splitlines() if line.startswith("Invite code"))
+    invite_line = next(line for line in created.output.splitlines() if line.startswith("Invite id"))
+    code = code_line.split(": ", 1)[1]
+    invitation_id = invite_line.split(": ", 1)[1]
+    assert code.startswith("pxi_")
+
+    listed = runner.invoke(args=["invites", "list", "--all"])
+    assert listed.exit_code == 0
+    assert invitation_id in listed.output
+    assert "cli.invited@example.com" in listed.output
+    assert code not in listed.output
+
+    revoked = runner.invoke(args=["invites", "revoke", invitation_id])
+    assert revoked.exit_code == 0
+    with app.app_context():
+        assert db.session.get(RegistrationInvite, invitation_id).status() == "revoked"
 
 
 def test_exact_subtopic_interests_generate_relevant_paper_notification(app, client):

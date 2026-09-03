@@ -38,6 +38,39 @@ and set `PEERXIV_RUN_MIGRATIONS=0` on web instances.
 - `PEERXIV_ALPHA_INVITE_CODE`: a separate random value when invite-only
 - `PEERXIV_CLAMAV_HOST`: the private clamd host used by the fail-closed upload gate
 - `PEERXIV_MALWARE_SCAN_REQUIRED=1`: keep enabled on every public environment
+- `PEERXIV_CREDENTIAL_ENCRYPTION_KEY`: a Fernet-compatible 32-byte key when
+  encrypted external connections such as Zenodo are enabled
+
+Optional ORCID login requires `PEERXIV_ORCID_CLIENT_ID`,
+`PEERXIV_ORCID_CLIENT_SECRET`, `PEERXIV_ORCID_ENVIRONMENT`, and an exact
+`PEERXIV_ORCID_REDIRECT_URI`. Use sandbox credentials until the callback flow
+has passed against the deployed origin. Register this callback:
+
+```text
+https://YOUR_HOST/api/v1/accounts/orcid/callback
+```
+
+The client secret belongs only in the service environment or `.env.ngrok`; it
+must never be committed or exposed to the browser.
+
+Zenodo DOI deposits use each researcher's own personal access token. Tokens are
+verified before storage, encrypted using `PEERXIV_CREDENTIAL_ENCRYPTION_KEY`,
+and never returned by the API. Start with:
+
+```text
+PEERXIV_ZENODO_ENVIRONMENT=sandbox
+PEERXIV_ZENODO_ALLOW_PRODUCTION_PUBLISH=0
+```
+
+Sandbox and production Zenodo accounts and tokens are separate. Production DOI
+publication is irreversible and remains blocked until the operator sets both
+`PEERXIV_ZENODO_ENVIRONMENT=production` and
+`PEERXIV_ZENODO_ALLOW_PRODUCTION_PUBLISH=1`. Back up the encryption key
+separately; losing it makes stored provider credentials unusable.
+
+PeerXiv 0.10 uses Zenodo's records API and explicit managed-DOI reservation
+endpoint. A reservation is accepted only when Zenodo identifies the DOI
+provider as `datacite`; an external-DOI state fails closed before file upload.
 
 `PEERXIV_ALLOW_SQLITE_PRODUCTION=1` is an explicit escape hatch for one process
 on one durable volume. It is not suitable for horizontal scaling.
@@ -60,14 +93,79 @@ needs substantial memory (plan for 4 GiB), and its signature volume must persist
 
 Accepted manuscripts currently use a filesystem. Multiple instances must mount
 the same durable storage, or the adapter must be replaced with object storage
-before scaling. Verified email/password recovery, ORCID/Overleaf/Git OAuth,
-moderation, and provider synchronization remain external integration work; the
-UI labels those flows as configuration-only rather than verified connections.
+before scaling. ORCID authentication is implemented, but verified
+email/password recovery, Overleaf/Git OAuth, moderation, and provider
+synchronization remain external integration work.
 
 The reference stack is suitable for an invite-only alpha. Do not enable open
 public registration until email verification/password recovery, abuse reporting
 and moderation, backups/restore drills, object storage, and browser testing
 against the deployed origin are complete.
+
+## Zero-cost invite-only alpha: ngrok
+
+An ngrok tunnel can publish one local Gunicorn process without opening a router
+port. The assigned HTTPS endpoint carries both HTTP and Socket.IO WebSockets.
+SQLite and accepted PDFs remain on the Mac under the gitignored `instance/`
+directory, so the machine must remain powered, awake, connected, and backed up.
+
+Install and authenticate the ngrok agent, then claim or copy the assigned
+development domain from the ngrok dashboard. Configure PeerXiv once:
+
+```sh
+make ngrok-config domain=your-domain.ngrok-free.app
+```
+
+This creates `.env.ngrok` with a production session secret, a credential
+encryption key, a separate private bootstrap code, and mode 0600. The file is ignored by Git. Never distribute the
+bootstrap code. Start subsequent sessions with:
+
+```sh
+make ngrok-alpha
+```
+
+The launcher migrates the local database, binds Gunicorn to `127.0.0.1` only,
+enables exactly one trusted proxy hop, waits for readiness, and starts the
+named HTTPS tunnel. Ctrl-C shuts down both processes. Override `PYTHON`,
+`GUNICORN`, or `NGROK` if those executables are not on the active PATH.
+
+Create a one-use invitation for each tester from another terminal, even while
+the tunnel is running:
+
+```sh
+make ngrok-invite email=researcher@example.com
+```
+
+The command prints the invitation code exactly once. The database retains only
+its SHA-256 digest, recipient email, use limit, expiration, status, and audit
+timestamps. The default expiration is 14 days. Operator commands always load
+the same `.env.ngrok` and `instance/ngrok-alpha.sqlite3` as the running service:
+
+```sh
+make ngrok-invites
+make ngrok-invite-revoke id=INVITATION_UUID
+```
+
+To intentionally change the defaults for a new invitation:
+
+```sh
+make ngrok-invite email=researcher@example.com INVITE_DAYS=30 INVITE_USES=1
+```
+
+This profile intentionally sets invite-only registration and makes ClamAV
+optional. PDF allowlisting, limits, parser validation, action/annotation
+removal, reconstruction, checksumming, and atomic publication remain active.
+Only trusted testers should receive invite codes or submission access. Do not
+use this profile for unrestricted public uploads.
+
+The free ngrok plan currently inserts a visitor interstitial and applies request
+and transfer quotas. The endpoint also disappears whenever the agent, app,
+network, or Mac stops. Back up both of these paths before and during the alpha:
+
+```text
+instance/ngrok-alpha.sqlite3
+instance/ngrok-manuscripts/
+```
 
 ## Recommended managed alpha: Render
 

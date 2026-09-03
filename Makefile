@@ -1,8 +1,10 @@
 PYTHON ?= python3
 GUNICORN ?= gunicorn
 FLASK := $(PYTHON) -m flask
+INVITE_DAYS ?= 14
+INVITE_USES ?= 1
 
-.PHONY: install run test smoke-live release-check migrate migration migration-check reset-dev-db
+.PHONY: install run test smoke-live release-check migrate migration migration-check reset-dev-db ngrok-config ngrok-alpha ngrok-invite ngrok-invites ngrok-invite-revoke
 
 install:
 	$(PYTHON) -m pip install -r requirements-dev.txt
@@ -40,3 +42,21 @@ migration-check:
 
 reset-dev-db:
 	PYTHON=$(PYTHON) scripts/reset_dev_db.sh
+
+ngrok-config:
+	@test -n "$(domain)" || (echo "usage: make ngrok-config domain=your-domain.ngrok-free.app" && exit 1)
+	PYTHON=$(PYTHON) scripts/configure_ngrok_alpha.sh "$(domain)"
+
+ngrok-alpha:
+	PYTHON=$(PYTHON) GUNICORN=$(GUNICORN) scripts/run_ngrok_alpha.sh
+
+ngrok-invite:
+	@test -n "$(email)" || (echo "usage: make ngrok-invite email=researcher@example.com" && exit 1)
+	PYTHON=$(PYTHON) scripts/run_ngrok_alpha.sh invites create --email "$(email)" --days "$(INVITE_DAYS)" --uses "$(INVITE_USES)"
+
+ngrok-invites:
+	PYTHON=$(PYTHON) scripts/run_ngrok_alpha.sh invites list --all
+
+ngrok-invite-revoke:
+	@test -n "$(id)" || (echo "usage: make ngrok-invite-revoke id=INVITATION_UUID" && exit 1)
+	PYTHON=$(PYTHON) scripts/run_ngrok_alpha.sh invites revoke "$(id)"

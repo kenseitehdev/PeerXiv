@@ -55,3 +55,14 @@ class ProfileInput(BaseModel):
     @classmethod
     def normalize_bio(cls, value):
         return clean_multiline(value)
+
+
+class ZenodoTokenInput(BaseModel):
+    """A personal token is accepted once and is never serialized back."""
+
+    token: str = Field(min_length=20, max_length=4096)
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def normalize_token(cls, value):
+        return str(value or "").strip()

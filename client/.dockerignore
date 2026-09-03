@@ -1,0 +1,14 @@
+.git
+.venv
+__pycache__
+*.py[cod]
+*.sqlite
+*.sqlite3
+.env
+node_modules
+.pytest_cache
+.coverage
+htmlcov
+client/uploads
+tests
+PeerXIV-release.zip

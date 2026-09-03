@@ -56,3 +56,61 @@ def test_private_research_space_members_papers_and_resources(app, client, anonym
     )
     assert updated.status_code == 200
     assert updated.get_json()["status"] == "review"
+
+
+def test_collaborator_autosuggest_roles_permissions_and_removal(app, client):
+    maya, maya_user = register(app, email="maya.collab@example.com", name="Maya Chen")
+    noor, noor_user = register(app, email="noor.collab@example.com", name="Noor Al-Sayed")
+    created = client.post(
+        "/api/v1/spaces",
+        json={
+            "kind": "workspace",
+            "title": "Verified collaboration workspace",
+            "visibility": "private",
+        },
+    ).get_json()
+    workspace_id = created["id"]
+    assert created["viewer_access"]["role"] == "owner"
+    assert "manage_members" in created["viewer_access"]["permissions"]
+
+    suggestions = client.get("/api/v1/accounts/people/search?q=maya").get_json()["results"]
+    assert [person["id"] for person in suggestions] == [maya_user["id"]]
+    assert suggestions[0]["email_match"] is None
+    exact_email = client.get(
+        "/api/v1/accounts/people/search?q=maya.collab%40example.com"
+    ).get_json()["results"]
+    assert exact_email[0]["email_match"] == "maya.collab@example.com"
+
+    added = client.post(
+        f"/api/v1/spaces/{workspace_id}/members",
+        json={"account_id": maya_user["id"], "role": "editor"},
+    )
+    assert added.status_code == 201
+    assert "edit_space" in added.get_json()["permissions"]
+
+    promoted = client.patch(
+        f"/api/v1/spaces/{workspace_id}/members/{maya_user['id']}",
+        json={"role": "maintainer"},
+    )
+    assert promoted.status_code == 200
+    assert "manage_members" in promoted.get_json()["permissions"]
+
+    forbidden_promotion = maya.post(
+        f"/api/v1/spaces/{workspace_id}/members",
+        json={"account_id": noor_user["id"], "role": "maintainer"},
+    )
+    assert forbidden_promotion.status_code == 403
+    added_noor = maya.post(
+        f"/api/v1/spaces/{workspace_id}/members",
+        json={"account_id": noor_user["id"], "role": "reviewer"},
+    )
+    assert added_noor.status_code == 201
+    assert added_noor.get_json()["permissions"] == ["view", "review"]
+
+    reviewer_view = noor.get(f"/api/v1/spaces/{workspace_id}").get_json()
+    assert reviewer_view["viewer_access"]["role"] == "reviewer"
+    assert noor.patch(f"/api/v1/spaces/{workspace_id}", json={"status": "changed"}).status_code == 403
+
+    removed = client.delete(f"/api/v1/spaces/{workspace_id}/members/{noor_user['id']}")
+    assert removed.status_code == 204
+    assert noor.get(f"/api/v1/spaces/{workspace_id}").status_code == 404

@@ -23,12 +23,22 @@ class Account(db.Model):
     email = db.Column(db.String(320), nullable=False, unique=True, index=True)
     display_name = db.Column(db.String(160), nullable=False, index=True)
     password_hash = db.Column(db.String(512), nullable=False)
+    orcid_id = db.Column(db.String(19), unique=True, index=True)
+    orcid_name = db.Column(db.String(160))
+    orcid_linked_at = db.Column(db.DateTime(timezone=True), index=True)
     role = db.Column(db.String(160), nullable=False, default="Researcher")
     bio = db.Column(db.Text, nullable=False, default="")
     active = db.Column(db.Boolean, nullable=False, default=True)
     created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
     updated_at = db.Column(
         db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    zenodo_connections = db.relationship(
+        "ZenodoConnection",
+        back_populates="account",
+        cascade="all, delete-orphan",
+        lazy="selectin",
     )
 
     def set_password(self, password: str) -> None:
@@ -44,10 +54,120 @@ class Account(db.Model):
             "role": self.role,
             "bio": self.bio,
             "created_at": self.created_at.isoformat(),
+            "orcid": (
+                {
+                    "id": self.orcid_id,
+                    "name": self.orcid_name or self.display_name,
+                    "url": f"https://orcid.org/{self.orcid_id}",
+                    "verified_at": self.orcid_linked_at.isoformat()
+                    if self.orcid_linked_at
+                    else None,
+                }
+                if self.orcid_id
+                else None
+            ),
         }
         if private:
             result.update({"email": self.email, "active": self.active})
         return result
+
+
+class ZenodoConnection(db.Model):
+    """An encrypted, per-researcher Zenodo API connection.
+
+    The API never serializes ``encrypted_token``.  A connection is scoped to
+    one Zenodo environment because sandbox and production accounts are wholly
+    separate.
+    """
+
+    __tablename__ = "zenodo_connections"
+    __table_args__ = (
+        db.UniqueConstraint("account_id", "environment", name="uq_zenodo_connection"),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=new_id)
+    account_id = db.Column(
+        db.String(36),
+        db.ForeignKey("accounts.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    environment = db.Column(db.String(24), nullable=False, index=True)
+    encrypted_token = db.Column(db.Text, nullable=False)
+    token_hint = db.Column(db.String(16), nullable=False)
+    scopes = db.Column(db.JSON, nullable=False, default=list)
+    verified_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    created_at = db.Column(db.DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    account = db.relationship("Account", back_populates="zenodo_connections")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "status": "connected",
+            "environment": self.environment,
+            "token_hint": self.token_hint,
+            "scopes": self.scopes,
+            "verified_at": self.verified_at.isoformat(),
+        }
+
+
+class RegistrationInvite(db.Model):
+    __tablename__ = "registration_invites"
+    __table_args__ = (
+        db.CheckConstraint("max_uses > 0", name="ck_registration_invite_max_uses"),
+        db.CheckConstraint("use_count >= 0", name="ck_registration_invite_use_count"),
+        db.CheckConstraint(
+            "use_count <= max_uses", name="ck_registration_invite_use_limit"
+        ),
+    )
+
+    id = db.Column(db.String(36), primary_key=True, default=new_id)
+    code_digest = db.Column(db.String(64), nullable=False, unique=True, index=True)
+    label = db.Column(db.String(160), nullable=False, default="Alpha invitation")
+    email = db.Column(db.String(320), index=True)
+    max_uses = db.Column(db.Integer, nullable=False, default=1)
+    use_count = db.Column(db.Integer, nullable=False, default=0)
+    expires_at = db.Column(db.DateTime(timezone=True), index=True)
+    revoked_at = db.Column(db.DateTime(timezone=True), index=True)
+    last_used_at = db.Column(db.DateTime(timezone=True))
+    created_at = db.Column(
+        db.DateTime(timezone=True), nullable=False, default=utc_now, index=True
+    )
+
+    @staticmethod
+    def _aware(value: datetime | None) -> datetime | None:
+        if value is not None and value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value
+
+    def status(self, *, now: datetime | None = None) -> str:
+        current = now or utc_now()
+        expires_at = self._aware(self.expires_at)
+        if self.revoked_at is not None:
+            return "revoked"
+        if expires_at is not None and expires_at <= current:
+            return "expired"
+        if self.use_count >= self.max_uses:
+            return "used"
+        return "active"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "label": self.label,
+            "email": self.email,
+            "max_uses": self.max_uses,
+            "use_count": self.use_count,
+            "remaining_uses": max(self.max_uses - self.use_count, 0),
+            "status": self.status(),
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
+            "created_at": self.created_at.isoformat(),
+        }
 
 
 class UserFollow(db.Model):

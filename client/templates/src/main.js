@@ -25,13 +25,16 @@ const state = {
   selectedPaper:null, selectedDiscussion:null, selectedWorkspace:null, selectedPresentation:null,
   selectedConference:null, selectedJournal:null, workspaceTab:"overview", conversation:0,
   uploadOpen:false, workflowModal:null, integrationModal:null, notificationOpen:false,
+  doiPaper:null,
+  collaboratorModal:false, collaboratorQuery:"", collaboratorResults:[], selectedCollaborator:null,
   citationPaper:null, citationStyle:"apa", shareTarget:null, discussionFilter:"active", discussionContext:null,
   mobileNavOpen:false, mobileConversationOpen:false, exploreOpen:true, spacesOpen:true,
   discussionsOpen:true, expandedAbstracts:new Set(), votes:new Map(persisted.votes||[]),
-  integrations:persisted.integrations||{
-    orcid:{status:"disconnected", identifier:"", visibility:"public"},
-    overleaf:{status:"disconnected", projectName:"", projectUrl:"", sync:"manual"},
-    git:{status:"disconnected", provider:"GitHub", remoteUrl:"", branch:"main"}
+  integrations:{
+    orcid:persisted.integrations?.orcid||{status:"disconnected", identifier:"", visibility:"public"},
+    zenodo:{status:"disconnected",environment:"sandbox",tokenHint:""},
+    overleaf:persisted.integrations?.overleaf||{status:"disconnected", projectName:"", projectUrl:"", sync:"manual"},
+    git:persisted.integrations?.git||{status:"disconnected", provider:"GitHub", remoteUrl:"", branch:"main"}
   },
   profile:persisted.profile||{name:"", initials:"PX", role:"", bio:""},
   collections:persisted.collections||[],
@@ -39,6 +42,7 @@ const state = {
   notifications:[],
   journalModel:persisted.journalModel||{title:"",scope:"",reviewModel:"Open post-publication review",governance:""},
   journalTab:"published", registrationMode:"open",
+  orcidAvailable:false, zenodoAvailable:false, zenodoEnvironment:"sandbox", zenodoProductionPublishEnabled:false,
   auth:{ready:false,authenticated:false,user:null,csrfToken:null}, authModal:null,
   people:[], activities:[], backendDiscussions:new Set(), backendSpaces:new Set(),
   toast:null
@@ -114,6 +118,15 @@ function applySession(payload){
       role:payload.user.role,
       bio:payload.user.bio||""
     };
+    state.integrations.orcid=payload.user.orcid
+      ?{status:"configured",identifier:payload.user.orcid.id,name:payload.user.orcid.name,visibility:"public"}
+      :{status:"disconnected",identifier:"",name:"",visibility:"public"};
+    state.integrations.zenodo=payload.user.zenodo
+      ?{status:"configured",environment:payload.user.zenodo.environment,tokenHint:payload.user.zenodo.token_hint||""}
+      :{status:"disconnected",environment:state.zenodoEnvironment,tokenHint:""};
+  }else{
+    state.integrations.orcid={status:"disconnected",identifier:"",name:"",visibility:"public"};
+    state.integrations.zenodo={status:"disconnected",environment:state.zenodoEnvironment,tokenHint:""};
   }
 }
 
@@ -232,7 +245,7 @@ function spaceFromBackend(record){
   const detail=record.details||{};
   const paper=record.papers?.[0]?.paper?.identifier||detail.paper||null;
   const common={id:record.id,backend:true,status:record.status,paper,updated:relativeTime(record.updated_at)};
-  if(record.kind==="workspace")return {...common,name:record.title,members:record.members?.length||1,repository:detail.repository||"",overleaf:detail.overleaf||"",artifacts:record.resources?.length||0,resourceRecords:record.resources||[]};
+  if(record.kind==="workspace")return {...common,name:record.title,members:record.members?.length||1,memberRecords:record.members||[],viewerAccess:record.viewer_access||{role:null,permissions:[]},owner:record.owner||null,repository:detail.repository||"",overleaf:detail.overleaf||"",artifacts:record.resources?.length||0,resourceRecords:record.resources||[]};
   if(record.kind==="presentation")return {...common,title:record.title,speaker:detail.speaker||record.owner?.display_name||"PeerXiv researcher",format:detail.format||"Presentation",event:detail.event||"",slides:Number(detail.slides)||1};
   if(record.kind==="conference")return {...common,name:record.title,location:detail.location||"Online",dates:detail.dates||"Dates pending",deadline:detail.deadline||"Pending",topics:detail.topics||record.description,followed:true};
   return {...common,paper:detail.paper_title||record.title,journal:detail.journal||record.title,status:record.status,doi:detail.doi||"Pending"};
@@ -281,6 +294,10 @@ async function initializeFrontend(){
       apiRequest("/accounts/me")
     ]);
     state.registrationMode=bootstrapPayload.registration_mode||"open";
+    state.orcidAvailable=Boolean(bootstrapPayload.orcid?.enabled);
+    state.zenodoAvailable=Boolean(bootstrapPayload.zenodo?.enabled);
+    state.zenodoEnvironment=bootstrapPayload.zenodo?.environment||"sandbox";
+    state.zenodoProductionPublishEnabled=Boolean(bootstrapPayload.zenodo?.production_publish_enabled);
     applySession(sessionPayload);
     await Promise.all([refreshAccountData(),refreshCommunityData(),refreshConversations()]);
     initializeRealtime();
@@ -290,7 +307,24 @@ async function initializeFrontend(){
   }
   render();
   await routeFromHash();
+  handleOrcidReturn();
   if(state.auth.authenticated)void refreshResearchNotifications();
+}
+
+function handleOrcidReturn(){
+  const params=new URLSearchParams(location.search);
+  const status=params.get("orcid");
+  if(!status)return;
+  const messages={
+    linked:"ORCID identity verified and linked.",
+    "signed-in":"Signed in with ORCID.",
+    unlinked:"That ORCID iD is not linked yet. Sign in with your PeerXiv account, then connect it from your profile.",
+    conflict:"That ORCID iD is already linked to another PeerXiv account.",
+    cancelled:"ORCID authentication was cancelled.",
+    error:"ORCID authentication could not be completed."
+  };
+  showToast(messages[status]||messages.error,["linked","signed-in"].includes(status)?"success":"error");
+  history.replaceState(null,"",`${location.pathname}${location.hash||"#profile"}`);
 }
 
 function paperFromBackend(record){
@@ -325,7 +359,9 @@ function paperFromBackend(record){
     pdfAvailable:Boolean(version?.manuscript_uri),
     pdfUrl:`/api/v1/papers/${encodeURIComponent(record.identifier)}/pdf`,
     metadataSummary:metadata?.summary||null,
-    metadataTags
+    metadataTags,
+    doi:version?.doi||null,
+    ownedByViewer:Boolean(record.owner?.id&&record.owner.id===state.auth.user?.id)
   };
 }
 
@@ -476,7 +512,7 @@ function paperCard(p){
   return `<article class="paper-card grid grid-cols-[2.75rem_minmax(0,1fr)] overflow-hidden rounded-lg sm:grid-cols-[3.25rem_minmax(0,1fr)]" data-paper="${esc(p.id)}">
     <aside class="vote-rail"><button class="${vote===1?"voted":""}" data-vote="up" data-id="${esc(p.id)}" aria-label="Upvote">${icon("caret-up")}</button><strong>${Number(p.score||0)+vote}</strong><button class="${vote===-1?"voted down":""}" data-vote="down" data-id="${esc(p.id)}" aria-label="Downvote">${icon("caret-down")}</button></aside>
     <div class="paper-body">
-      <div class="paper-kicker flex flex-wrap items-center gap-x-2 gap-y-1"><button data-topic="${esc(p.topic)}">${esc(p.code)}</button><span>${p.status==="draft"?"Saved":"Submitted"} ${esc(p.time)}</span><span>${esc(p.version)}</span>${p.status==="draft"?`<span class="draft-status">Draft</span>`:p.openReview?`<span class="review-status">Open review</span>`:""}</div>
+      <div class="paper-kicker flex flex-wrap items-center gap-x-2 gap-y-1"><button data-topic="${esc(p.topic)}">${esc(p.code)}</button><span>${p.status==="draft"?"Saved":"Submitted"} ${esc(p.time)}</span><span>${esc(p.version)}</span>${p.doi?.state==="published"?`<a class="doi-badge" href="${esc(p.doi.doi_url)}" target="_blank" rel="noopener noreferrer">DOI</a>`:""}${p.status==="draft"?`<span class="draft-status">Draft</span>`:p.openReview?`<span class="review-status">Open review</span>`:""}</div>
       <h2>${esc(p.title)}</h2>
       <p class="authors">${esc(p.authors)}</p>
       <p class="abstract ${expanded?"expanded":""}">${esc(p.abstract)}</p>
@@ -532,7 +568,16 @@ function messagesPage(){
   return `<div class="messages-page grid min-h-[calc(100dvh-7rem)] grid-cols-1 md:min-h-[calc(100vh-4rem)] md:grid-cols-[22rem_minmax(0,1fr)]"><aside class="conversation-list ${state.mobileConversationOpen?"hidden md:block":"block"}"><header><span class="eyebrow">MESSAGES</span><h1>Inbox</h1><button data-action="new-message">${icon("pen-to-square")}</button></header><label>${icon("magnifying-glass")}<input placeholder="Search conversations" data-conversation-search/></label>${conversations.map(c=>`<button class="conversation ${c.id===active.id?"active":""}" data-conversation="${esc(c.id)}"><span class="avatar">${esc(initials(c.name))}</span><span><strong>${esc(c.name)}</strong><small>${esc(c.preview)}</small></span><time>${esc(c.time)}${c.unread?`<b>${Number(c.unread)}</b>`:""}</time></button>`).join("")}</aside><section class="message-panel ${state.mobileConversationOpen?"flex":"hidden md:flex"}"><header><button class="message-back md:hidden" data-action="back-to-inbox" aria-label="Back to inbox">${icon("arrow-left")}</button><span class="avatar">${esc(initials(active.name))}</span><div><h2>${esc(active.name)}</h2><small>Persistent research conversation</small></div><button>${icon("ellipsis")}</button></header><div class="message-history"><div class="day">Messages</div>${history.map(message=>`<p class="bubble ${message.direction==="incoming"?"incoming":"outgoing"}">${esc(message.content)}</p>`).join("")||`<p class="empty-conversation">Start the research conversation.</p>`}</div><form class="message-composer" data-message-form data-conversation-id="${esc(active.id)}"><button type="button">${icon("paperclip")}</button><textarea name="message" required maxlength="10000" placeholder="Message ${esc(active.name)}"></textarea><button class="send" type="submit">${icon("paper-plane")}</button></form></section></div>`
 }
 
-function profilePage(){const orcid=state.integrations.orcid;const overleaf=state.integrations.overleaf;const git=state.integrations.git;return `<div class="simple-page mx-auto max-w-5xl px-4 py-7 sm:px-6 md:py-12"><span class="eyebrow">RESEARCHER PROFILE</span><div class="profile-heading"><span class="avatar large">${esc(state.profile.initials)}</span><div><div class="identity-line"><h1>${esc(state.profile.name)}</h1>${orcid.status==="configured"?`<span class="orcid-verified"><i class="fa-brands fa-orcid"></i> ${esc(orcid.identifier)}</span>`:""}</div><p>${esc(state.profile.role)} · ${esc(state.profile.bio)}</p></div><div class="profile-actions"><button data-action="edit-profile">Edit profile</button>${state.auth.authenticated?`<button data-action="logout">Sign out</button>`:""}</div></div><div class="profile-stats grid grid-cols-2 gap-2 md:grid-cols-4"><div><b>${papers.filter(p=>p.authors.includes(state.profile.name)).length}</b><span>Preprints</span></div><div><b>${papers.filter(p=>p.authors.includes(state.profile.name)).reduce((sum,p)=>sum+(p.citations||0),0)}</b><span>Citations</span></div><div><b>${state.people.filter(r=>r.following).length}</b><span>Following</span></div><div><b>${discussions.filter(d=>d.author===state.profile.name).length}</b><span>Discussions</span></div></div><section class="integrations-section"><header><div><span class="eyebrow">CONNECTED SERVICES</span><h2>Research integrations</h2></div><p>These provider settings are still stored in this browser; authenticated OAuth, verification, and synchronization are the next integration phase.</p></header><div class="integration-grid"><article class="${orcid.status}"><span class="integration-logo orcid-logo"><i class="fa-brands fa-orcid"></i></span><div><h3>ORCID</h3><p>${esc(orcid.status==="configured"?(orcid.identifier||"Identity configuration saved locally."):"Verify identity and import authorship records.")}</p></div><button data-integration="orcid">${orcid.status==="configured"?"Manage":"Configure"}</button></article><article class="${overleaf.status}"><span class="integration-logo overleaf-logo">TeX</span><div><h3>Overleaf</h3><p>${esc(overleaf.status==="configured"?(overleaf.projectName||"Project configuration saved locally."):"Import manuscripts and synchronize submission drafts.")}</p></div><button data-integration="overleaf">${overleaf.status==="configured"?"Manage":"Configure"}</button></article><article class="${git.status}"><span class="integration-logo git-logo">${icon("code-branch")}</span><div><h3>Git</h3><p>${esc(git.status==="configured"?(git.remoteUrl||"Repository configuration saved locally."):"Attach repositories, releases, and commit provenance.")}</p></div><button data-integration="git">${git.status==="configured"?"Manage":"Configure"}</button></article></div></section><h2>Network activity</h2><div class="profile-activity">${state.activities.slice(0,8).map(item=>`<article><span class="avatar">${esc(initials(item.actor?.display_name))}</span><div><b>${esc(item.summary)}</b><small>${esc(relativeTime(item.created_at))}</small></div></article>`).join("")||`<p>Your submissions, discussions, follows, and Research Space changes will appear here.</p>`}</div><h2>Recent submissions</h2><div class="paper-list">${papers.filter(p=>p.authors.includes(state.profile.name)&&p.status!=="draft").map(paperCard).join("")}</div></div>`}
+function profilePage(){const orcid=state.integrations.orcid;const overleaf=state.integrations.overleaf;const git=state.integrations.git;return `<div class="simple-page mx-auto max-w-5xl px-4 py-7 sm:px-6 md:py-12"><span class="eyebrow">RESEARCHER PROFILE</span><div class="profile-heading"><span class="avatar large">${esc(state.profile.initials)}</span><div><div class="identity-line"><h1>${esc(state.profile.name)}</h1>${orcid.status==="configured"?`<span class="orcid-verified"><i class="fa-brands fa-orcid"></i> ${esc(orcid.identifier)}</span>`:""}</div><p>${esc(state.profile.role)} · ${esc(state.profile.bio)}</p></div><div class="profile-actions"><button data-action="edit-profile">Edit profile</button>${state.auth.authenticated?`<button data-action="logout">Sign out</button>`:""}</div></div><div class="profile-stats grid grid-cols-2 gap-2 md:grid-cols-4"><div><b>${papers.filter(p=>p.authors.includes(state.profile.name)).length}</b><span>Preprints</span></div><div><b>${papers.filter(p=>p.authors.includes(state.profile.name)).reduce((sum,p)=>sum+(p.citations||0),0)}</b><span>Citations</span></div><div><b>${state.people.filter(r=>r.following).length}</b><span>Following</span></div><div><b>${discussions.filter(d=>d.author===state.profile.name).length}</b><span>Discussions</span></div></div><section class="integrations-section"><header><div><span class="eyebrow">CONNECTED SERVICES</span><h2>Research integrations</h2></div><p>ORCID identity is verified by the server. Overleaf and Git remain connection metadata until their provider integrations are enabled.</p></header><div class="integration-grid"><article class="${orcid.status}"><span class="integration-logo orcid-logo"><i class="fa-brands fa-orcid"></i></span><div><h3>ORCID</h3><p>${esc(orcid.status==="configured"?(orcid.identifier||"Verified identity linked."):state.orcidAvailable?"Verify identity and enable ORCID sign-in.":"ORCID OAuth is not configured on this instance.")}</p></div><button data-integration="orcid">${orcid.status==="configured"?"Manage":"Connect"}</button></article><article class="${overleaf.status}"><span class="integration-logo overleaf-logo">TeX</span><div><h3>Overleaf</h3><p>${esc(overleaf.status==="configured"?(overleaf.projectName||"Project configuration saved locally."):"Import manuscripts and synchronize submission drafts.")}</p></div><button data-integration="overleaf">${overleaf.status==="configured"?"Manage":"Configure"}</button></article><article class="${git.status}"><span class="integration-logo git-logo">${icon("code-branch")}</span><div><h3>Git</h3><p>${esc(git.status==="configured"?(git.remoteUrl||"Repository configuration saved locally."):"Attach repositories, releases, and commit provenance.")}</p></div><button data-integration="git">${git.status==="configured"?"Manage":"Configure"}</button></article></div></section><h2>Network activity</h2><div class="profile-activity">${state.activities.slice(0,8).map(item=>`<article><span class="avatar">${esc(initials(item.actor?.display_name))}</span><div><b>${esc(item.summary)}</b><small>${esc(relativeTime(item.created_at))}</small></div></article>`).join("")||`<p>Your submissions, discussions, follows, and Research Space changes will appear here.</p>`}</div><h2>Recent submissions</h2><div class="paper-list">${papers.filter(p=>p.authors.includes(state.profile.name)&&p.status!=="draft").map(paperCard).join("")}</div></div>`}
+
+function profilePageWithDoi(){
+  const base=profilePage();
+  const zenodo=state.integrations.zenodo;
+  const card=`<article class="${zenodo.status}"><span class="integration-logo zenodo-logo">DOI</span><div><h3>Zenodo</h3><p>${esc(zenodo.status==="configured"?`${zenodo.environment} connected · token ${zenodo.tokenHint}`:`Connect ${state.zenodoEnvironment} for versioned DOI deposits.`)}</p></div><button data-integration="zenodo">${zenodo.status==="configured"?"Manage":"Connect"}</button></article>`;
+  return base
+    .replace("ORCID identity is verified by the server. Overleaf and Git remain connection metadata until their provider integrations are enabled.","ORCID identity and Zenodo DOI deposits are verified by the server. Overleaf and Git remain local connection metadata.")
+    .replace('</div></section><h2>Network activity',`${card}</div></section><h2>Network activity`);
+}
 
 function libraryPage(){const saved=papers.filter(p=>p.saved||p.status==="draft");return `<div class="content-layout grid min-h-[calc(100vh-4rem)] grid-cols-1 lg:grid-cols-[minmax(0,1fr)_18rem] xl:grid-cols-[15rem_minmax(0,1fr)_18rem]">${leftNav()}<main class="center-column min-w-0 px-4 py-5 sm:px-6 md:py-7"><section class="feed-page"><header class="feed-header"><div><span class="eyebrow">YOUR LIBRARY</span><h1>Saved research & drafts</h1><p>Papers, submission drafts, and research threads you want to return to.</p></div></header><div class="collection-row">${state.collections.map(name=>`<span>${icon("folder")} ${esc(name)}</span>`).join("")}<button data-action="new-collection">${icon("folder-plus")} New collection</button></div><div class="feed-meta"><span><b>${saved.length}</b> records</span></div><div class="paper-list">${saved.map(paperCard).join("")||`<div class="empty"><h2>Your library is empty</h2><p>Save a paper or create a submission draft to keep it here.</p></div>`}</div></section></main>${rightRail()}</div>`}
 
@@ -579,7 +624,7 @@ function paperDetail(p){
         <div class="paper-kicker flex flex-wrap gap-2"><button data-topic="${esc(p.topic)}">${esc(p.code)}</button><span>${esc(p.id)}</span><span>${esc(p.version)}</span><span>${esc(p.submitted)}</span></div>
         <h1>${esc(p.title)}</h1>
         <p class="detail-authors">${esc(p.authors)}</p>
-        <div class="detail-actions flex flex-wrap gap-2"><button class="primary" data-pdf="${esc(p.id)}">${icon("file-pdf")} View PDF</button><button data-save="${esc(p.id)}">${icon("bookmark")} ${p.saved?"Saved":"Save"}</button><button data-cite="${esc(p.id)}">${icon("quote-right")} Cite</button><button data-share="${esc(p.id)}">${icon("share-nodes")} Share</button></div>
+        <div class="detail-actions flex flex-wrap gap-2"><button class="primary" data-pdf="${esc(p.id)}">${icon("file-pdf")} View PDF</button><button data-save="${esc(p.id)}">${icon("bookmark")} ${p.saved?"Saved":"Save"}</button><button data-cite="${esc(p.id)}">${icon("quote-right")} Cite</button><button data-share="${esc(p.id)}">${icon("share-nodes")} Share</button>${p.ownedByViewer?`<button data-doi="${esc(p.id)}">${icon("fingerprint")} ${p.doi?.state==="published"?"Manage DOI":"Get DOI"}</button>`:""}</div>
         <h2>Abstract</h2>
         <p class="full-abstract">${esc(p.abstract)}</p>
         <div class="tag-row">${p.tags.map(t=>`<span>${esc(t)}</span>`).join("")}</div>
@@ -591,7 +636,7 @@ function paperDetail(p){
         </section>
       </main>
       <aside>
-        <section class="side-card record-card"><h2>Research record</h2><dl><div><dt>Identifier</dt><dd>${esc(p.id)}</dd></div><div><dt>Current version</dt><dd>${esc(p.version)}</dd></div><div><dt>Open review</dt><dd>${p.openReview?"Enabled":"Limited"}</dd></div><div><dt>License</dt><dd>${esc(p.license||"CC BY 4.0")}</dd></div><div><dt>Artifacts</dt><dd>${p.manuscript?"Manuscript PDF":"No PDF attached"}</dd></div><div><dt>Classification</dt><dd>${esc(p.topic)} · ${esc(p.code)}</dd></div></dl></section>
+        <section class="side-card record-card"><h2>Research record</h2><dl><div><dt>Identifier</dt><dd>${esc(p.id)}</dd></div><div><dt>Current version</dt><dd>${esc(p.version)}</dd></div><div><dt>DOI</dt><dd>${p.doi?.doi?(p.doi.state==="published"?`<a href="${esc(p.doi.doi_url)}" target="_blank" rel="noopener noreferrer">${esc(p.doi.doi)}</a><small>${esc(p.doi.environment)} · registered</small>`:`<span>${esc(p.doi.doi)}</span><small>${esc(p.doi.environment)} · reserved; activates after publication</small>`):"Not registered"}</dd></div><div><dt>Open review</dt><dd>${p.openReview?"Enabled":"Limited"}</dd></div><div><dt>License</dt><dd>${esc(p.license||"CC BY 4.0")}</dd></div><div><dt>Artifacts</dt><dd>${p.manuscript?"Manuscript PDF":"No PDF attached"}</dd></div><div><dt>Classification</dt><dd>${esc(p.topic)} · ${esc(p.code)}</dd></div></dl></section>
         <section class="side-card vote-large"><span>Community score</span><div><button data-vote="up" data-id="${esc(p.id)}">${icon("caret-up")}</button><b>${p.score+(state.votes.get(p.id)||0)}</b><button data-vote="down" data-id="${esc(p.id)}">${icon("caret-down")}</button></div></section>
         <section class="side-card"><h2>Version history</h2>${versionHistory.map(version=>`<div class="version"><b>v${Number(version.number)||1}</b><span>${Number(version.number)===(Number(String(p.version).replace(/^v/,""))||1)?"Current revision":"Earlier revision"}</span><small>${esc(version.created_at?new Date(version.created_at).toLocaleDateString():p.submitted)}</small></div>`).join("")}</section>
       </aside>
@@ -605,9 +650,52 @@ function integrationDialog(){
   const kind=state.integrationModal;
   if(!kind) return "";
   const current=state.integrations[kind];
-  const fields=kind==="orcid"?`<label>ORCID iD<input name="identifier" value="${esc(current.identifier)}" placeholder="0000-0000-0000-0000" required/></label><label>Record visibility<select name="visibility"><option ${current.visibility==="public"?"selected":""}>public</option><option ${current.visibility==="limited"?"selected":""}>limited</option></select></label>`:kind==="overleaf"?`<label>Project name<input name="projectName" value="${esc(current.projectName)}" required placeholder="Research manuscript"/></label><label>Overleaf project URL<input name="projectUrl" value="${esc(current.projectUrl)}" required placeholder="https://www.overleaf.com/project/..."/></label><label>Synchronization<select name="sync"><option value="manual" ${current.sync==="manual"?"selected":""}>Manual import</option><option value="requested" ${current.sync==="requested"?"selected":""}>Request automatic sync when backend is available</option></select></label>`:`<label>Provider<select name="provider"><option ${current.provider==="GitHub"?"selected":""}>GitHub</option><option ${current.provider==="GitLab"?"selected":""}>GitLab</option><option ${current.provider==="Other"?"selected":""}>Other</option></select></label><label>Repository remote<input name="remoteUrl" value="${esc(current.remoteUrl)}" required placeholder="https://github.com/org/repository.git"/></label><label>Default branch<input name="branch" value="${esc(current.branch)}" required placeholder="main"/></label>`;
+  if(kind==="orcid"){
+    return `<div class="modal-layer integration-layer fixed inset-0 z-[60] grid place-items-center overflow-y-auto bg-black/60 p-3"><section class="upload-modal workflow-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8"><button type="button" class="close" data-action="close-integration">${icon("xmark")}</button><span class="eyebrow">VERIFIED RESEARCH IDENTITY</span><h2>${current.status==="configured"?"ORCID connected":"Connect ORCID"}</h2><p>${current.status==="configured"?`PeerXiv verified ${esc(current.name||state.profile.name)} as ${esc(current.identifier)} through ORCID OAuth.`:"Authenticate at ORCID to link a verified iD. PeerXiv stores the iD and verification time, not your ORCID password or access token."}</p>${current.status==="configured"?`<a class="orcid-record-link" href="https://orcid.org/${esc(current.identifier)}" target="_blank" rel="noopener noreferrer"><i class="fa-brands fa-orcid"></i> View ORCID record</a>`:""}<div class="backend-boundary">${icon("shield-halved")} Linking does not bypass PeerXiv invitations. After linking, the same ORCID iD can be used to sign in.</div><footer>${current.status==="configured"?`<button type="button" class="danger" data-action="disconnect-integration" data-kind="orcid">Unlink ORCID</button>`:""}<button type="button" data-action="close-integration">Cancel</button>${current.status!=="configured"?`<button class="primary" type="button" data-action="start-orcid-link" ${state.orcidAvailable?"":"disabled"}>${state.orcidAvailable?"Continue to ORCID":"ORCID is not configured"}</button>`:""}</footer></section></div>`;
+  }
+  if(kind==="zenodo"){
+    const environment=state.zenodoEnvironment;
+    const providerUrl=environment==="sandbox"?"https://sandbox.zenodo.org/account/settings/applications/tokens/new/":"https://zenodo.org/account/settings/applications/tokens/new/";
+    return `<div class="modal-layer integration-layer fixed inset-0 z-[60] grid place-items-center overflow-y-auto bg-black/60 p-3"><section class="upload-modal workflow-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8"><button type="button" class="close" data-action="close-integration">${icon("xmark")}</button><span class="eyebrow">DOI PRESERVATION</span><h2>${current.status==="configured"?`Zenodo ${esc(environment)} connected`:`Connect Zenodo ${esc(environment)}`}</h2><p>${current.status==="configured"?`The encrypted token ending ${esc(current.tokenHint)} can create DOI preservation drafts for papers you own.`:"Connect your own Zenodo account so deposits remain under the researcher’s custody."}</p>${current.status==="configured"?`<div class="backend-boundary">${icon("shield-halved")} Tokens are encrypted at rest and never returned by the PeerXiv API.</div><footer><button class="danger" type="button" data-action="disconnect-zenodo">Disconnect</button><button type="button" data-action="close-integration">Close</button></footer>`:`<form data-zenodo-form><a class="orcid-record-link" href="${providerUrl}" target="_blank" rel="noopener noreferrer">Create token with deposit scopes ${icon("arrow-up-right-from-square")}</a><label>Personal access token<input name="token" type="password" required minlength="20" maxlength="4096" autocomplete="off"/></label><div class="backend-boundary">${icon("shield-halved")} Required scopes: deposit:write and deposit:actions.</div><footer><button type="button" data-action="close-integration">Cancel</button><button class="primary" type="submit" ${state.zenodoAvailable?"":"disabled"}>${state.zenodoAvailable?"Verify and connect":"Server encryption not configured"}</button></footer></form>`}</section></div>`;
+  }
+  const fields=kind==="overleaf"?`<label>Project name<input name="projectName" value="${esc(current.projectName)}" required placeholder="Research manuscript"/></label><label>Overleaf project URL<input name="projectUrl" value="${esc(current.projectUrl)}" required placeholder="https://www.overleaf.com/project/..."/></label><label>Synchronization<select name="sync"><option value="manual" ${current.sync==="manual"?"selected":""}>Manual import</option><option value="requested" ${current.sync==="requested"?"selected":""}>Request automatic sync when backend is available</option></select></label>`:`<label>Provider<select name="provider"><option ${current.provider==="GitHub"?"selected":""}>GitHub</option><option ${current.provider==="GitLab"?"selected":""}>GitLab</option><option ${current.provider==="Other"?"selected":""}>Other</option></select></label><label>Repository remote<input name="remoteUrl" value="${esc(current.remoteUrl)}" required placeholder="https://github.com/org/repository.git"/></label><label>Default branch<input name="branch" value="${esc(current.branch)}" required placeholder="main"/></label>`;
   const titles={orcid:"Configure ORCID",overleaf:"Configure Overleaf",git:"Configure Git repository"};
-  return `<div class="modal-layer integration-layer fixed inset-0 z-[60] grid place-items-center overflow-y-auto bg-black/60 p-3"><form class="upload-modal workflow-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8" data-integration-form data-kind="${kind}"><button type="button" class="close" data-action="close-integration">${icon("xmark")}</button><span class="eyebrow">CONNECTED SERVICE</span><h2>${titles[kind]}</h2><p>This configuration is persisted locally. OAuth, remote verification, synchronization, and webhooks require the backend.</p>${fields}<div class="backend-boundary">${icon("shield-halved")} No credentials or access tokens are requested or stored.</div><footer>${current.status==="configured"?`<button type="button" class="danger" data-action="disconnect-integration" data-kind="${kind}">Remove configuration</button>`:""}<button type="button" data-action="close-integration">Cancel</button><button class="primary" type="submit">Save configuration</button></footer></form></div>`;
+  return `<div class="modal-layer integration-layer fixed inset-0 z-[60] grid place-items-center overflow-y-auto bg-black/60 p-3"><form class="upload-modal workflow-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8" data-integration-form data-kind="${kind}"><button type="button" class="close" data-action="close-integration">${icon("xmark")}</button><span class="eyebrow">CONNECTED SERVICE</span><h2>${titles[kind]}</h2><p>This configuration is persisted locally. Remote verification, synchronization, and webhooks require the backend.</p>${fields}<div class="backend-boundary">${icon("shield-halved")} No provider passwords or access tokens are requested or stored.</div><footer>${current.status==="configured"?`<button type="button" class="danger" data-action="disconnect-integration" data-kind="${kind}">Remove configuration</button>`:""}<button type="button" data-action="close-integration">Cancel</button><button class="primary" type="submit">Save configuration</button></footer></form></div>`;
+}
+
+function doiDialog(){
+  if(!state.doiPaper)return "";
+  const paper=paperById(state.doiPaper);
+  if(!paper)return "";
+  const record=paper.doi;
+  const zenodo=state.integrations.zenodo;
+  const environment=state.zenodoEnvironment;
+  const providerUrl=environment==="sandbox"?"https://sandbox.zenodo.org/account/settings/applications/tokens/new/":"https://zenodo.org/account/settings/applications/tokens/new/";
+  let workflow="";
+  if(!state.zenodoAvailable){
+    workflow=`<div class="doi-state error-state"><b>Server encryption is not configured</b><p>Add <code>PEERXIV_CREDENTIAL_ENCRYPTION_KEY</code> to the server before connecting Zenodo.</p></div>`;
+  }else if(zenodo.status!=="configured"){
+    workflow=`<form class="doi-state" data-zenodo-form><h3>Connect Zenodo ${esc(environment)}</h3><p>Create a personal access token with <code>deposit:write</code> and <code>deposit:actions</code>. PeerXiv verifies it once and stores only an encrypted copy.</p><a href="${providerUrl}" target="_blank" rel="noopener noreferrer">Create ${esc(environment)} token ${icon("arrow-up-right-from-square")}</a><label>Personal access token<input name="token" type="password" required minlength="20" maxlength="4096" autocomplete="off" placeholder="Paste once; it will not be shown again"/></label><button class="primary" type="submit">Verify and connect</button></form>`;
+  }else if(!record){
+    workflow=`<div class="doi-state"><h3>Prepare DOI metadata</h3><p>PeerXiv will create a version-specific metadata snapshot. This step stays local and does not contact Zenodo.</p><button class="primary" data-action="prepare-doi">Prepare metadata</button></div>`;
+  }else if(["metadata_ready","deposit_created","error"].includes(record.state)){
+    workflow=`<form class="doi-state" data-doi-reserve-form>${record.last_error?`<div class="doi-error">${esc(record.last_error)}</div>`:""}<h3>${record.provider_record_id?"Resume DOI reservation":"Reserve a DOI"}</h3><p>This creates an unpublished Zenodo ${esc(environment)} draft, reserves a DOI, and uploads this exact PDF. It does not publish the DOI.</p><label class="confirmation-check"><input name="no_existing_doi" type="checkbox" required/> I confirm this exact paper version does not already have a DOI.</label><button class="primary" type="submit">${record.provider_record_id?"Retry reservation":"Reserve DOI and upload PDF"}</button></form>`;
+  }else if(record.state==="reserved"){
+    const blocked=environment==="production"&&!state.zenodoProductionPublishEnabled;
+    workflow=`<form class="doi-state" data-doi-publish-form><h3>Reserved DOI</h3>${record.provider_record_url?`<a class="reserved-doi" href="${esc(record.provider_record_url)}" target="_blank" rel="noopener noreferrer">${esc(record.doi)}</a>`:`<span class="reserved-doi">${esc(record.doi)}</span>`}<p><b>This DOI will not resolve through DOI.org until the Zenodo record is published.</b></p><p>${environment==="sandbox"?"This is a test DOI using the 10.5072 prefix. Sandbox records may be deleted.":"Publishing creates a permanent public Zenodo record and registers the DOI. This cannot be undone."}</p>${blocked?`<div class="doi-error">Production publication is disabled on the server.</div>`:`<label>Type the DOI exactly to publish<input name="confirmation" required autocomplete="off" placeholder="${esc(record.doi)}"/></label><button class="primary danger-confirm" type="submit">Publish record and register DOI</button>`}</form>`;
+  }else{
+    workflow=`<div class="doi-state published-state"><span>${icon("circle-check")}</span><h3>DOI registered</h3><a class="reserved-doi" href="${esc(record.doi_url)}" target="_blank" rel="noopener noreferrer">${esc(record.doi)}</a><p>This DOI is now included in PeerXiv citations and the version-specific machine-readable landing page.</p><a href="${esc(record.provider_record_url||record.doi_url)}" target="_blank" rel="noopener noreferrer">View Zenodo record</a></div>`;
+  }
+  return `<div class="modal-layer fixed inset-0 z-[70] grid place-items-center overflow-y-auto bg-black/60 p-3"><section class="upload-modal workflow-dialog doi-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8"><button type="button" class="close" data-action="close-doi">${icon("xmark")}</button><span class="eyebrow">PERSISTENT IDENTIFIER</span><h2>DOI for ${esc(paper.version)}</h2><p><b>${esc(paper.title)}</b></p><div class="doi-summary"><span>${icon("file-shield")} ${paper.pdfAvailable?"PDF checksum retained":"PDF required"}</span><span>${icon("server")} Zenodo ${esc(environment)}</span><span>${icon("fingerprint")} ${record?esc(record.state):"not prepared"}</span></div>${workflow}<footer><button type="button" data-action="close-doi">Close</button>${zenodo.status==="configured"&&record?.state!=="published"?`<button type="button" data-action="disconnect-zenodo">Disconnect Zenodo ${esc(zenodo.tokenHint)}</button>`:""}</footer></section></div>`;
+}
+
+function collaboratorDialog(){
+  if(!state.collaboratorModal)return "";
+  const workspace=workspaces[state.selectedWorkspace];
+  if(!workspace)return "";
+  const selected=state.selectedCollaborator;
+  const maintainerOption=workspace.viewerAccess?.role==="owner"?`<option value="maintainer">Maintainer — members and settings</option>`:"";
+  return `<div class="modal-layer fixed inset-0 z-[60] grid place-items-center overflow-y-auto bg-black/60 p-3"><form class="upload-modal workflow-dialog collaborator-dialog relative w-full max-w-xl rounded-xl p-5 sm:p-8" data-collaborator-form><button type="button" class="close" data-action="close-collaborator">${icon("xmark")}</button><span class="eyebrow">WORKSPACE ACCESS</span><h2>Add a collaborator</h2><p>Search existing PeerXiv researchers by name, role, email, or verified ORCID iD. Access is granted to the selected account—not to an unverified text label.</p><label>Find researcher<input name="collaborator_search" data-collaborator-search value="${esc(state.collaboratorQuery)}" autocomplete="off" placeholder="Start typing a name or ORCID iD"/></label><div class="collaborator-results">${state.collaboratorResults.map(person=>`<button type="button" class="${selected?.id===person.id?"selected":""}" data-select-collaborator="${esc(person.id)}"><span class="avatar">${esc(initials(person.display_name))}</span><span><b>${esc(person.display_name)}</b><small>${esc(person.role)}${person.orcid?.id?` · ORCID ${esc(person.orcid.id)}`:""}</small></span>${selected?.id===person.id?icon("check"):""}</button>`).join("")||(state.collaboratorQuery.length>=2?`<p>No matching PeerXiv researchers.</p>`:`<p>Enter at least two characters.</p>`)}</div><label>Workspace role<select name="role"><option value="contributor">Contributor — files and artifacts</option><option value="editor">Editor — workspace metadata and papers</option><option value="reviewer">Reviewer — review access</option><option value="viewer">Viewer — read only</option>${maintainerOption}</select></label><div class="backend-boundary">${icon("shield-halved")} Only the workspace owner can grant maintainer access.</div><footer><button type="button" data-action="close-collaborator">Cancel</button><button class="primary" type="submit" ${selected?"":"disabled"}>Add collaborator</button></footer></form></div>`;
 }
 
 function workflowDialog(){
@@ -650,8 +738,13 @@ function workspaceDetailPage(){
   const workspace=workspaces[index];
   if(!workspace){state.selectedWorkspace=null;return workspacesPage()}
   const linked=papers.find(p=>p.id===workspace.paper);
-  const tabs=[["overview","Overview"],["source","Source & manuscripts"],["artifacts","Artifacts"],["activity","Activity"]];
-  const panel=state.workspaceTab==="source"?`<div class="workspace-panel"><h2>Connected source</h2><div class="resource-row"><span class="integration-logo git-logo">${icon("code-branch")}</span><div><b>Git repository</b><p>${esc(workspace.repository||"No repository configured")}</p></div><button data-integration="git">${workspace.repository?"Manage":"Configure"}</button></div><div class="resource-row"><span class="integration-logo overleaf-logo">TeX</span><div><b>Overleaf manuscript</b><p>${esc(workspace.overleaf||"No project configured")}</p></div><button data-integration="overleaf">${workspace.overleaf?"Manage":"Configure"}</button></div></div>`:state.workspaceTab==="artifacts"?`<div class="workspace-panel"><h2>Artifacts</h2><p>${Number(workspace.artifacts||0)} artifacts are registered with this workspace.</p><button class="primary" data-action="add-artifact">${icon("plus")} Register artifact</button></div>`:state.workspaceTab==="activity"?`<div class="workspace-panel activity-list"><h2>Activity</h2><p><b>Workspace updated</b><span>${esc(workspace.updated||"just now")}</span></p><p><b>Paper relationship retained</b><span>${esc(workspace.paper||"No paper linked")}</span></p><p><b>Local prototype state saved</b><span>Browser storage</span></p></div>`:`<div class="workspace-panel"><h2>Research overview</h2>${linked?`<button class="linked-paper" data-paper="${esc(linked.id)}">${icon("file-lines")}<span><b>${esc(linked.title)}</b><small>${esc(linked.id)} · ${esc(linked.version)}</small></span>${icon("arrow-right")}</button>`:`<p>No paper is connected yet.</p>`}<div class="workspace-metrics"><div><b>${Number(workspace.members||1)}</b><span>Collaborators</span></div><div><b>${Number(workspace.artifacts||0)}</b><span>Artifacts</span></div><div><b>${workspace.repository?1:0}</b><span>Repositories</span></div></div></div>`;
+  const tabs=[["overview","Overview"],["source","Source & manuscripts"],["artifacts","Artifacts"],["collaborators","Collaborators"],["activity","Activity"]];
+  const canManageMembers=(workspace.viewerAccess?.permissions||[]).includes("manage_members");
+  const canManageResources=(workspace.viewerAccess?.permissions||[]).includes("manage_resources");
+  const roleOptions=["maintainer","editor","contributor","reviewer","viewer"];
+  const assignableRoles=workspace.viewerAccess?.role==="owner"?roleOptions:roleOptions.filter(role=>role!=="maintainer");
+  const collaboratorPanel=`<div class="workspace-panel collaborator-panel"><header><div><h2>Collaborators</h2><p>Roles control access across the workspace, its linked papers, files, artifacts, and reviews.</p></div>${canManageMembers?`<button class="primary" data-action="add-collaborator">${icon("user-plus")} Add collaborator</button>`:""}</header><div class="member-list">${(workspace.memberRecords||[]).map(member=>{const locked=member.role==="owner"||!canManageMembers;return `<article><span class="avatar">${esc(initials(member.user?.display_name))}</span><div><b>${esc(member.user?.display_name)}</b><small>${esc(member.user?.role||"Researcher")}${member.user?.orcid?.id?` · ORCID ${esc(member.user.orcid.id)}`:""}</small></div>${locked?`<span class="role-pill">${esc(member.role)}</span>`:`<select data-member-role="${esc(member.user.id)}" aria-label="Role for ${esc(member.user.display_name)}">${assignableRoles.map(role=>`<option value="${role}" ${member.role===role?"selected":""}>${role}</option>`).join("")}</select><button class="member-remove" data-remove-member="${esc(member.user.id)}" aria-label="Remove ${esc(member.user.display_name)}">${icon("xmark")}</button>`}</article>`}).join("")||`<p>No collaborators yet.</p>`}</div></div>`;
+  const panel=state.workspaceTab==="source"?`<div class="workspace-panel"><h2>Connected source</h2><div class="resource-row"><span class="integration-logo git-logo">${icon("code-branch")}</span><div><b>Git repository</b><p>${esc(workspace.repository||"No repository configured")}</p></div><button data-integration="git">${workspace.repository?"Manage":"Configure"}</button></div><div class="resource-row"><span class="integration-logo overleaf-logo">TeX</span><div><b>Overleaf manuscript</b><p>${esc(workspace.overleaf||"No project configured")}</p></div><button data-integration="overleaf">${workspace.overleaf?"Manage":"Configure"}</button></div></div>`:state.workspaceTab==="artifacts"?`<div class="workspace-panel"><h2>Artifacts</h2><p>${Number(workspace.artifacts||0)} artifacts are registered with this workspace.</p>${canManageResources?`<button class="primary" data-action="add-artifact">${icon("plus")} Register artifact</button>`:""}</div>`:state.workspaceTab==="collaborators"?collaboratorPanel:state.workspaceTab==="activity"?`<div class="workspace-panel activity-list"><h2>Activity</h2><p><b>Workspace updated</b><span>${esc(workspace.updated||"just now")}</span></p><p><b>Paper relationship retained</b><span>${esc(workspace.paper||"No paper linked")}</span></p><p><b>Your role</b><span>${esc(workspace.viewerAccess?.role||"public")}</span></p></div>`:`<div class="workspace-panel"><h2>Research overview</h2>${linked?`<button class="linked-paper" data-paper="${esc(linked.id)}">${icon("file-lines")}<span><b>${esc(linked.title)}</b><small>${esc(linked.id)} · ${esc(linked.version)}</small></span>${icon("arrow-right")}</button>`:`<p>No paper is connected yet.</p>`}<div class="workspace-metrics"><div><b>${Number(workspace.members||1)}</b><span>Collaborators</span></div><div><b>${Number(workspace.artifacts||0)}</b><span>Artifacts</span></div><div><b>${workspace.repository?1:0}</b><span>Repositories</span></div></div></div>`;
   return `<div class="workspace-detail mx-auto max-w-6xl px-4 py-7 sm:px-6"><button class="back" data-action="back-workspaces">${icon("arrow-left")} All workspaces</button><header><span class="eyebrow">${esc(workspace.status||"ACTIVE")} WORKSPACE</span><h1>${esc(workspace.name)}</h1><p>Linked research, source, manuscripts, artifacts, and provenance in one working context.</p></header><nav>${tabs.map(([id,label])=>`<button class="${state.workspaceTab===id?"active":""}" data-workspace-tab="${id}">${label}</button>`).join("")}</nav>${panel}</div>`;
 }
 
@@ -691,16 +784,16 @@ function authDialog(){
   const registering=state.authModal==="register";
   const registrationAvailable=state.registrationMode!=="disabled";
   const registrationCopy=state.registrationMode==="invite"?"PeerXiv is accepting invited alpha researchers.":"Publish, discuss, build research spaces, and receive relevant research notifications.";
-  return `<div class="modal-layer fixed inset-0 z-[70] grid place-items-center overflow-y-auto bg-black/60 p-3"><form class="upload-modal auth-dialog relative w-full max-w-md rounded-xl p-5 sm:p-8" data-auth-form="${registering?"register":"login"}"><button type="button" class="close" data-action="close-auth">${icon("xmark")}</button><span class="eyebrow">${registering?"JOIN THE RESEARCH NETWORK":"WELCOME BACK"}</span><h2>${registering?"Create your PeerXiv account":"Sign in to PeerXiv"}</h2><p>${registering?registrationCopy:"Continue your papers, discussions, spaces, and research network."}</p>${registering?`<label>Display name<input name="display_name" required minlength="2" autocomplete="name" placeholder="Your name"/></label><label>Role<input name="role" required value="Researcher" autocomplete="organization-title"/></label>${state.registrationMode==="invite"?`<label>Alpha invite code<input name="invite_code" required minlength="12" autocomplete="off"/></label>`:""}`:""}<label>Email<input name="email" type="email" required autocomplete="email" placeholder="you@example.org"/></label><label>Password<input name="password" type="password" required minlength="${registering?12:1}" autocomplete="${registering?"new-password":"current-password"}"/></label><footer>${registering?`<button type="button" data-auth-switch="login">I already have an account</button>`:registrationAvailable?`<button type="button" data-auth-switch="register">${state.registrationMode==="invite"?"Use an invite":"Create account"}</button>`:"<span>Registration is currently closed.</span>"}<button class="primary" type="submit">${registering?"Create account":"Sign in"}</button></footer></form></div>`;
+  return `<div class="modal-layer fixed inset-0 z-[70] grid place-items-center overflow-y-auto bg-black/60 p-3"><form class="upload-modal auth-dialog relative w-full max-w-md rounded-xl p-5 sm:p-8" data-auth-form="${registering?"register":"login"}"><button type="button" class="close" data-action="close-auth">${icon("xmark")}</button><span class="eyebrow">${registering?"JOIN THE RESEARCH NETWORK":"WELCOME BACK"}</span><h2>${registering?"Create your PeerXiv account":"Sign in to PeerXiv"}</h2><p>${registering?registrationCopy:"Continue your papers, discussions, spaces, and research network."}</p>${!registering&&state.orcidAvailable?`<button type="button" class="orcid-signin" data-action="start-orcid-login"><i class="fa-brands fa-orcid"></i> Continue with ORCID</button><div class="auth-divider"><span>or use email</span></div>`:""}${registering?`<label>Display name<input name="display_name" required minlength="2" autocomplete="name" placeholder="Your name"/></label><label>Role<input name="role" required value="Researcher" autocomplete="organization-title"/></label>${state.registrationMode==="invite"?`<label>Alpha invite code<input name="invite_code" required minlength="12" autocomplete="off"/></label>`:""}`:""}<label>Email<input name="email" type="email" required autocomplete="email" placeholder="you@example.org"/></label><label>Password<input name="password" type="password" required minlength="${registering?12:1}" autocomplete="${registering?"new-password":"current-password"}"/></label><footer>${registering?`<button type="button" data-auth-switch="login">I already have an account</button>`:registrationAvailable?`<button type="button" data-auth-switch="register">${state.registrationMode==="invite"?"Use an invite":"Create account"}</button>`:"<span>Registration is currently closed.</span>"}<button class="primary" type="submit">${registering?"Create account":"Sign in"}</button></footer></form></div>`;
 }
 
 function toastView(){return state.toast?`<div class="toast ${state.toast.tone}">${icon(state.toast.tone==="error"?"triangle-exclamation":"circle-check")} ${esc(state.toast.message)}</div>`:""}
 
 function render(){
-  const routes={messages:messagesPage,discussions:discussionsPage,library:libraryPage,connections:connectionsPage,profile:profilePage,spaces:spacesHubPage,workspaces:workspacesPage,presentations:presentationsPage,conferences:conferencesPage,journals:journalsPage};
+  const routes={messages:messagesPage,discussions:discussionsPage,library:libraryPage,connections:connectionsPage,profile:profilePageWithDoi,spaces:spacesHubPage,workspaces:workspacesPage,presentations:presentationsPage,conferences:conferencesPage,journals:journalsPage};
   const body=state.selectedPaper?paperDetail(state.selectedPaper):state.selectedDiscussion?discussionDetailPage():state.selectedWorkspace!==null?workspaceDetailPage():state.selectedPresentation!==null?presentationDetailPage():state.selectedConference!==null?conferenceDetailPage():state.selectedJournal!==null?journalDetailPage():(routes[state.page]||homeLayout)();
-  app.innerHTML=`${topNav()}${body}${state.uploadOpen?uploadModal():""}${workflowDialog()}${integrationDialog()}${citationDialog()}${shareDialog()}${authDialog()}${toastView()}`;
-  document.body.classList.toggle("overlay-open", Boolean(state.mobileNavOpen||state.uploadOpen||state.workflowModal||state.integrationModal||state.citationPaper||state.shareTarget||state.authModal));
+  app.innerHTML=`${topNav()}${body}${state.uploadOpen?uploadModal():""}${workflowDialog()}${integrationDialog()}${doiDialog()}${collaboratorDialog()}${citationDialog()}${shareDialog()}${authDialog()}${toastView()}`;
+  document.body.classList.toggle("overlay-open", Boolean(state.mobileNavOpen||state.uploadOpen||state.workflowModal||state.integrationModal||state.doiPaper||state.collaboratorModal||state.citationPaper||state.shareTarget||state.authModal));
   bind();
 }
 
@@ -771,14 +864,17 @@ function canonicalDiscussionUrl(id){return `${location.origin}${location.pathnam
 
 function citationVariants(p){
   const year=p.submitted?.match(/\b(?:19|20)\d{2}\b/)?.[0]||String(new Date().getFullYear());
-  const url=canonicalPaperUrl(p.id);
+  const registeredDoi=p.doi?.state==="published"?p.doi.doi:null;
+  const url=registeredDoi?`https://doi.org/${registeredDoi}`:canonicalPaperUrl(p.id);
+  const doiText=registeredDoi?` https://doi.org/${registeredDoi}`:"";
+  const bibtexDoi=registeredDoi?`,\n  doi = {${registeredDoi}}`:"";
   const key=`${p.authors.split(",")[0].trim().split(/\s+/).at(-1)||"peerxiv"}${year}${p.id.replace(/[^a-z0-9]/gi,"")}`;
   const title=p.title.replace(/[{}]/g,"");
   return {
-    apa:`${p.authors} (${year}). ${p.title}. PeerXiv (${p.id}, ${p.version}). ${url}`,
-    mla:`${p.authors}. “${p.title}.” PeerXiv, ${year}, ${p.id}, ${p.version}. ${url}.`,
-    chicago:`${p.authors}. “${p.title}.” PeerXiv ${p.version} (${year}). ${p.id}. ${url}.`,
-    bibtex:`@article{${key},\n  author = {${p.authors.replaceAll(", "," and ")}},\n  title = {${title}},\n  journal = {PeerXiv},\n  year = {${year}},\n  number = {${p.id}},\n  note = {${p.version}},\n  url = {${url}}\n}`
+    apa:`${p.authors} (${year}). ${p.title}. PeerXiv (${p.id}, ${p.version}).${doiText||` ${url}`}`,
+    mla:`${p.authors}. “${p.title}.” PeerXiv, ${year}, ${p.id}, ${p.version}.${doiText||` ${url}`}.`,
+    chicago:`${p.authors}. “${p.title}.” PeerXiv ${p.version} (${year}). ${p.id}.${doiText||` ${url}`}.`,
+    bibtex:`@article{${key},\n  author = {${p.authors.replaceAll(", "," and ")}},\n  title = {${title}},\n  journal = {PeerXiv},\n  year = {${year}},\n  number = {${p.id}},\n  note = {${p.version}}${bibtexDoi},\n  url = {${url}}\n}`
   };
 }
 
@@ -820,15 +916,6 @@ function openShareTarget(target){state.shareTarget=target;render()}
 function sharePaper(p){
   if(!p)return;
   openShareTarget({kind:"paper",id:p.id,title:p.title,text:`${p.title} — ${p.authors}`,url:canonicalPaperUrl(p.id)});
-}
-
-function validOrcid(value){
-  const compact=value.replaceAll("-","").toUpperCase();
-  if(!/^\d{15}[\dX]$/.test(compact)) return false;
-  let total=0;
-  for(const digit of compact.slice(0,15)) total=(total+Number(digit))*2;
-  const result=(12-(total%11))%11;
-  return (result===10?"X":String(result))===compact.at(-1);
 }
 
 async function handleComment(event){
@@ -900,10 +987,162 @@ async function handleAuth(event){
   }
 }
 
+async function startOrcid(mode){
+  if(mode==="link"&&!requireSignedIn("link ORCID"))return;
+  try{
+    const payload=await apiRequest(`/accounts/orcid/start?mode=${encodeURIComponent(mode)}`);
+    window.location.assign(payload.authorization_url);
+  }catch(error){
+    showToast(error.message||"ORCID authentication is unavailable.","error");
+  }
+}
+
+async function unlinkOrcid(){
+  try{
+    await apiRequest("/accounts/orcid",{method:"DELETE"});
+    applySession(await apiRequest("/accounts/me"));
+    state.integrationModal=null;
+    await refreshAccountData();
+    persistPrototype();render();showToast("ORCID iD unlinked.");
+  }catch(error){showToast(error.message||"Could not unlink ORCID.","error")}
+}
+
+function applyDoiRecord(paper,record){
+  paper.doi=record;
+  if(paper.versions?.length)paper.versions.at(-1).doi=record;
+  if(state.selectedPaper?.id===paper.id)state.selectedPaper=paper;
+}
+
+async function connectZenodo(event){
+  event.preventDefault();
+  const form=event.currentTarget;
+  const token=new FormData(form).get("token").trim();
+  form.querySelectorAll("button,input").forEach(control=>control.disabled=true);
+  try{
+    const connection=await apiRequest("/accounts/zenodo",{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({token})
+    });
+    state.integrations.zenodo={status:"configured",environment:connection.environment,tokenHint:connection.token_hint||""};
+    render();showToast(`Zenodo ${connection.environment} connected.`);
+  }catch(error){
+    form.querySelectorAll("button,input").forEach(control=>control.disabled=false);
+    showToast(error.message||"Could not connect Zenodo.","error");
+  }
+}
+
+async function disconnectZenodo(){
+  try{
+    await apiRequest("/accounts/zenodo",{method:"DELETE"});
+    state.integrations.zenodo={status:"disconnected",environment:state.zenodoEnvironment,tokenHint:""};
+    render();showToast("Zenodo disconnected.");
+  }catch(error){showToast(error.message||"Could not disconnect Zenodo.","error")}
+}
+
+async function prepareDoi(){
+  const paper=paperById(state.doiPaper);
+  if(!paper)return;
+  try{
+    applyDoiRecord(paper,await apiRequest(`/papers/${encodeURIComponent(paper.id)}/doi/prepare`,{method:"POST"}));
+    render();showToast("Version-specific DOI metadata prepared.");
+  }catch(error){showToast(error.message||"Could not prepare DOI metadata.","error")}
+}
+
+async function reserveDoi(event){
+  event.preventDefault();
+  const paper=paperById(state.doiPaper);
+  if(!paper)return;
+  const form=event.currentTarget;
+  const confirmed=new FormData(form).get("no_existing_doi")==="on";
+  form.querySelectorAll("button,input").forEach(control=>control.disabled=true);
+  try{
+    applyDoiRecord(paper,await apiRequest(`/papers/${encodeURIComponent(paper.id)}/doi/reserve`,{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({no_existing_doi:confirmed})
+    }));
+    render();showToast(`${paper.doi.doi} reserved; the record is still unpublished.`);
+  }catch(error){
+    form.querySelectorAll("button,input").forEach(control=>control.disabled=false);
+    showToast(error.message||"Could not reserve the DOI.","error");
+  }
+}
+
+async function publishDoi(event){
+  event.preventDefault();
+  const paper=paperById(state.doiPaper);
+  if(!paper)return;
+  const form=event.currentTarget;
+  const confirmation=new FormData(form).get("confirmation").trim();
+  form.querySelectorAll("button,input").forEach(control=>control.disabled=true);
+  try{
+    applyDoiRecord(paper,await apiRequest(`/papers/${encodeURIComponent(paper.id)}/doi/publish`,{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({confirmation})
+    }));
+    render();showToast(`${paper.doi.doi} registered and published.`);
+  }catch(error){
+    form.querySelectorAll("button,input").forEach(control=>control.disabled=false);
+    showToast(error.message||"Could not publish the DOI record.","error");
+  }
+}
+
+async function searchCollaborators(query){
+  const normalized=query.trim();
+  if(normalized.length<2){state.collaboratorResults=[];render();return}
+  try{
+    const payload=await apiRequest(`/accounts/people/search?q=${encodeURIComponent(normalized)}&limit=10`);
+    const workspace=workspaces[state.selectedWorkspace];
+    const currentIds=new Set((workspace?.memberRecords||[]).map(member=>member.user?.id));
+    state.collaboratorResults=(payload.results||[]).filter(person=>!currentIds.has(person.id));
+    render();
+    requestAnimationFrame(()=>{
+      const input=app.querySelector("[data-collaborator-search]");
+      input?.focus();input?.setSelectionRange(input.value.length,input.value.length);
+    });
+  }catch(error){showToast(error.message||"Could not search collaborators.","error")}
+}
+
+async function handleCollaborator(event){
+  event.preventDefault();
+  const workspace=workspaces[state.selectedWorkspace];
+  const person=state.selectedCollaborator;
+  if(!workspace?.backend||!person)return;
+  const role=new FormData(event.currentTarget).get("role");
+  try{
+    await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}/members`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({account_id:person.id,role})
+    });
+    upsertSpace(await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}`));
+    state.collaboratorModal=false;state.collaboratorQuery="";state.collaboratorResults=[];state.selectedCollaborator=null;
+    render();showToast(`${person.display_name} added as ${role}.`);
+  }catch(error){showToast(error.message||"Could not add this collaborator.","error")}
+}
+
+async function updateWorkspaceMember(userId,role){
+  const workspace=workspaces[state.selectedWorkspace];
+  if(!workspace?.backend)return;
+  try{
+    await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}/members/${encodeURIComponent(userId)}`,{
+      method:"PATCH",headers:{"Content-Type":"application/json"},body:JSON.stringify({role})
+    });
+    upsertSpace(await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}`));
+    render();showToast(`Workspace role changed to ${role}.`);
+  }catch(error){showToast(error.message||"Could not change this role.","error");render()}
+}
+
+async function removeWorkspaceMember(userId){
+  const workspace=workspaces[state.selectedWorkspace];
+  if(!workspace?.backend)return;
+  try{
+    await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}/members/${encodeURIComponent(userId)}`,{method:"DELETE"});
+    upsertSpace(await apiRequest(`/spaces/${encodeURIComponent(workspace.id)}`));
+    render();showToast("Collaborator removed.");
+  }catch(error){showToast(error.message||"Could not remove this collaborator.","error")}
+}
+
 async function handleLogout(){
   try{await apiRequest("/accounts/logout",{method:"POST"})}catch(error){console.warn(error)}
   realtimeSocket?.disconnect();realtimeSocket=null;
   state.auth={ready:true,authenticated:false,user:null,csrfToken:null};
+  state.integrations.orcid={status:"disconnected",identifier:"",name:"",visibility:"public"};
   state.people=[];state.activities=[];state.notifications=[];state.messages={};conversations.splice(0,conversations.length);state.conversation=null;
   state.page="home";clearSelections();render();showToast("Signed out.");
 }
@@ -1017,7 +1256,7 @@ async function handleSubmission(event){
       pdfAvailable:Boolean(published?.manuscript_uri),
       pdfUrl:`/api/v1/papers/${encodeURIComponent(draft.identifier)}/pdf`,
       metadataSummary:metadata?.summary||null,
-      metadataTags
+      metadataTags,doi:null,ownedByViewer:true
     };
     papers.unshift(paper);
     const workspaceIndex=data.get("workspace");
@@ -1047,14 +1286,7 @@ function handleIntegration(event){
   const form=event.currentTarget;
   const kind=form.dataset.kind;
   const data=new FormData(form);
-  if(kind==="orcid"){
-    const identifier=data.get("identifier").trim();
-    if(!validOrcid(identifier)){
-      const field=form.elements.identifier;
-      field.setCustomValidity("Enter a valid ORCID iD, including its checksum.");field.reportValidity();field.setCustomValidity("");return;
-    }
-    state.integrations.orcid={status:"configured",identifier,visibility:data.get("visibility")};
-  }else if(kind==="overleaf"){
+  if(kind==="overleaf"){
     let parsed;
     try{parsed=new URL(data.get("projectUrl").trim())}catch{parsed=null}
     if(!parsed||!(parsed.hostname==="overleaf.com"||parsed.hostname.endsWith(".overleaf.com"))){
@@ -1070,7 +1302,7 @@ function handleIntegration(event){
   }
   state.integrationModal=null;
   persistPrototype();
-  showToast(`${kind==="git"?"Git":kind==="orcid"?"ORCID":"Overleaf"} configuration saved locally.`);
+  showToast(`${kind==="git"?"Git":"Overleaf"} configuration saved locally.`);
 }
 
 async function handleWorkflow(event){
@@ -1130,6 +1362,7 @@ async function handleWorkflow(event){
 }
 
 function bind(){
+  app.querySelectorAll(".doi-badge").forEach(el=>el.onclick=e=>e.stopPropagation());
   app.querySelectorAll("[data-page]").forEach(el=>el.onclick=()=>{const protectedPages=new Set(["messages","library","profile"]);if(protectedPages.has(el.dataset.page)&&!requireSignedIn(`open ${el.dataset.page}`))return;state.page=el.dataset.page;clearSelections();setRouteHash("","");state.mobileNavOpen=false;state.mobileConversationOpen=false;state.notificationOpen=false;render()});
   app.querySelectorAll("[data-topic]").forEach(el=>el.onclick=e=>{e.stopPropagation();state.topic=el.dataset.topic;state.page="topic";clearSelections();setRouteHash("","");state.mobileNavOpen=false;render()});
   app.querySelectorAll("[data-paper]").forEach(el=>el.onclick=e=>{if(e.target.closest("[data-save],[data-cite],[data-share],[data-pdf]"))return;const notification=state.notifications.find(item=>item.id===el.dataset.notification);if(notification)void markNotificationRead(notification);void openPaper(el.dataset.paper)});
@@ -1153,6 +1386,7 @@ function bind(){
   app.querySelectorAll("[data-pdf]").forEach(el=>el.onclick=e=>{e.stopPropagation();openPdf(paperById(el.dataset.pdf))});
   app.querySelectorAll("[data-cite]").forEach(el=>el.onclick=e=>{e.stopPropagation();state.citationPaper=el.dataset.cite;state.citationStyle="apa";render()});
   app.querySelectorAll("[data-share]").forEach(el=>el.onclick=e=>{e.stopPropagation();sharePaper(paperById(el.dataset.share))});
+  app.querySelectorAll("[data-doi]").forEach(el=>el.onclick=e=>{e.preventDefault();e.stopPropagation();if(!requireSignedIn("manage a DOI"))return;state.doiPaper=el.dataset.doi;render()});
   app.querySelectorAll("[data-share-discussion]").forEach(el=>el.onclick=e=>{e.stopPropagation();const discussion=discussions.find(item=>item.id===el.dataset.shareDiscussion);if(discussion)openShareTarget({kind:"discussion",id:discussion.id,title:discussion.title,text:`${discussion.title} — ${discussion.author}`,url:canonicalDiscussionUrl(discussion.id)})});
   app.querySelector('[data-action="toggle-explore"]')?.addEventListener("click",()=>{state.exploreOpen=!state.exploreOpen;render()});
   app.querySelector('[data-action="toggle-discussions"]')?.addEventListener("click",()=>{if(state.page!=="discussions"){state.page="discussions";clearSelections();state.discussionsOpen=true;setRouteHash("","")}else{state.discussionsOpen=!state.discussionsOpen}state.mobileNavOpen=false;render()});
@@ -1162,9 +1396,20 @@ function bind(){
   app.querySelector('[data-action="back-to-inbox"]')?.addEventListener("click",()=>{state.mobileConversationOpen=false;render()});
   app.querySelectorAll('[data-action="upload"]').forEach(el=>el.onclick=()=>{if(!requireSignedIn("submit research"))return;state.uploadOpen=true;render()});
   app.querySelectorAll('[data-action="close-upload"]').forEach(el=>el.onclick=()=>{state.uploadOpen=false;render()});
-  app.querySelectorAll('[data-integration]').forEach(el=>el.onclick=e=>{e.preventDefault();e.stopPropagation();state.integrationModal=el.dataset.integration;render()});
+  app.querySelectorAll('[data-integration]').forEach(el=>el.onclick=e=>{e.preventDefault();e.stopPropagation();if(["orcid","zenodo"].includes(el.dataset.integration)&&!requireSignedIn(`connect ${el.dataset.integration}`))return;state.integrationModal=el.dataset.integration;render()});
   app.querySelectorAll('[data-action="close-integration"]').forEach(el=>el.onclick=()=>{state.integrationModal=null;render()});
-  app.querySelector('[data-action="disconnect-integration"]')?.addEventListener("click",e=>{const kind=e.currentTarget.dataset.kind;state.integrations[kind]={...state.integrations[kind],status:"disconnected"};state.integrationModal=null;persistPrototype();showToast("Local service configuration removed.")});
+  app.querySelectorAll('[data-action="close-doi"]').forEach(el=>el.onclick=()=>{state.doiPaper=null;render()});
+  app.querySelector('[data-action="prepare-doi"]')?.addEventListener("click",()=>{void prepareDoi()});
+  app.querySelector('[data-action="disconnect-zenodo"]')?.addEventListener("click",()=>{void disconnectZenodo()});
+  app.querySelector('[data-action="start-orcid-link"]')?.addEventListener("click",()=>{void startOrcid("link")});
+  app.querySelector('[data-action="start-orcid-login"]')?.addEventListener("click",()=>{void startOrcid("login")});
+  app.querySelector('[data-action="disconnect-integration"]')?.addEventListener("click",e=>{const kind=e.currentTarget.dataset.kind;if(kind==="orcid"){void unlinkOrcid();return}if(kind==="zenodo"){void disconnectZenodo();return}state.integrations[kind]={...state.integrations[kind],status:"disconnected"};state.integrationModal=null;persistPrototype();showToast("Local service configuration removed.")});
+  app.querySelector('[data-action="add-collaborator"]')?.addEventListener("click",()=>{state.collaboratorModal=true;state.collaboratorQuery="";state.collaboratorResults=[];state.selectedCollaborator=null;render()});
+  app.querySelectorAll('[data-action="close-collaborator"]').forEach(el=>el.onclick=()=>{state.collaboratorModal=false;state.selectedCollaborator=null;render()});
+  app.querySelector('[data-collaborator-search]')?.addEventListener("input",e=>{state.collaboratorQuery=e.target.value;state.selectedCollaborator=null;window.clearTimeout(searchCollaborators.timer);searchCollaborators.timer=window.setTimeout(()=>{void searchCollaborators(state.collaboratorQuery)},180)});
+  app.querySelectorAll('[data-select-collaborator]').forEach(el=>el.onclick=()=>{state.selectedCollaborator=state.collaboratorResults.find(person=>person.id===el.dataset.selectCollaborator)||null;render()});
+  app.querySelectorAll('[data-member-role]').forEach(el=>el.onchange=()=>{void updateWorkspaceMember(el.dataset.memberRole,el.value)});
+  app.querySelectorAll('[data-remove-member]').forEach(el=>el.onclick=()=>{if(window.confirm?.("Remove this collaborator from the workspace?"))void removeWorkspaceMember(el.dataset.removeMember)});
   const workflowActions={"new-workspace":"workspace","new-discussion":"discussion","new-conference":"conference","link-publication":"publication",filters:"filters","new-message":"message","edit-profile":"profile","new-collection":"collection","add-artifact":"artifact","new-presentation":"presentation","define-journal":"journalModel"};
   Object.entries(workflowActions).forEach(([action,type])=>app.querySelectorAll(`[data-action="${action}"]`).forEach(el=>el.onclick=e=>{e.preventDefault();e.stopPropagation();const protectedTypes=new Set(["workspace","discussion","conference","publication","message","profile","artifact","presentation","journalModel"]);if(protectedTypes.has(type)&&!requireSignedIn(type==="discussion"?"start a discussion":"save this research action"))return;if(type==="discussion")state.discussionContext=el.dataset.linkedPaper||state.selectedPaper?.id||null;state.workflowModal=type;render()}));
   app.querySelectorAll('[data-action="close-workflow"]').forEach(el=>el.onclick=()=>{state.workflowModal=null;render()});
@@ -1199,6 +1444,10 @@ function bind(){
   app.querySelector('[data-comment-form]')?.addEventListener("submit",handleComment);
   app.querySelector('[data-discussion-reply]')?.addEventListener("submit",handleDiscussionReply);
   app.querySelector('[data-integration-form]')?.addEventListener("submit",handleIntegration);
+  app.querySelector('[data-zenodo-form]')?.addEventListener("submit",connectZenodo);
+  app.querySelector('[data-doi-reserve-form]')?.addEventListener("submit",reserveDoi);
+  app.querySelector('[data-doi-publish-form]')?.addEventListener("submit",publishDoi);
+  app.querySelector('[data-collaborator-form]')?.addEventListener("submit",handleCollaborator);
   app.querySelector('[data-workflow-form]')?.addEventListener("submit",handleWorkflow);
   app.querySelector('[data-share-form]')?.addEventListener("submit",handleShareSubmit);
   app.querySelector('[data-auth-form]')?.addEventListener("submit",handleAuth);
@@ -1206,7 +1455,7 @@ function bind(){
   document.onkeydown=e=>{
     if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();app.querySelector(".site-search input")?.focus();return;}
     if(e.key!=="Escape")return;
-    if(state.authModal){state.authModal=null;render()}else if(state.shareTarget){state.shareTarget=null;render()}else if(state.citationPaper){state.citationPaper=null;render()}else if(state.integrationModal){state.integrationModal=null;render()}else if(state.workflowModal){state.workflowModal=null;render()}else if(state.uploadOpen){state.uploadOpen=false;render()}else if(state.notificationOpen){state.notificationOpen=false;render()}else if(state.mobileNavOpen){state.mobileNavOpen=false;render()}else if(state.mobileConversationOpen){state.mobileConversationOpen=false;render()}
+    if(state.authModal){state.authModal=null;render()}else if(state.shareTarget){state.shareTarget=null;render()}else if(state.citationPaper){state.citationPaper=null;render()}else if(state.doiPaper){state.doiPaper=null;render()}else if(state.collaboratorModal){state.collaboratorModal=false;state.selectedCollaborator=null;render()}else if(state.integrationModal){state.integrationModal=null;render()}else if(state.workflowModal){state.workflowModal=null;render()}else if(state.uploadOpen){state.uploadOpen=false;render()}else if(state.notificationOpen){state.notificationOpen=false;render()}else if(state.mobileNavOpen){state.mobileNavOpen=false;render()}else if(state.mobileConversationOpen){state.mobileConversationOpen=false;render()}
   };
 }
 

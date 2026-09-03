@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ paper.title }} — PeerXiv</title>
+  <meta name="description" content="{{ paper.abstract|striptags|truncate(300, True) }}">
+  <meta name="citation_title" content="{{ version.title }}">
+  {% for author in version.authors %}<meta name="citation_author" content="{{ author }}">{% endfor %}
+  <meta name="citation_publication_date" content="{{ version.published_at.date().isoformat() }}">
+  <meta name="citation_online_date" content="{{ version.published_at.date().isoformat() }}">
+  <meta name="citation_pdf_url" content="{{ url_for('papers.version_pdf', identifier=paper.identifier, number=version.number, _external=True) }}">
+  <meta name="citation_abstract_html_url" content="{{ request.url }}">
+  {% if registered_doi %}<meta name="citation_doi" content="{{ registered_doi }}">{% endif %}
+  <meta name="DC.identifier" content="{{ registered_doi or paper.identifier }}">
+  <meta name="DC.type" content="Text.Preprint">
+  <meta name="DC.rights" content="{{ paper.license }}">
+  <script type="application/ld+json">{{ json_ld | tojson }}</script>
+  <link rel="stylesheet" href="{{ url_for('static', filename='src/record.css') }}">
+</head>
+<body>
+  <header><div><a class="brand" href="{{ url_for('server.frontend') }}#paper={{ paper.identifier|urlencode }}"><span>PX</span>PeerXiv</a><span>Versioned research record</span></div></header>
+  <main>
+    <p class="eyebrow">{{ paper.subject }} · {{ paper.subfield or 'PeerXiv' }}</p>
+    <h1>{{ version.title }}</h1>
+    <p class="authors">{{ version.authors|join(', ') }}</p>
+    <p class="abstract">{{ version.abstract }}</p>
+    <dl class="record">
+      <div><dt>PeerXiv identifier</dt><dd>{{ paper.identifier }}</dd></div>
+      <div><dt>Version</dt><dd>v{{ version.number }}</dd></div>
+      <div><dt>Published</dt><dd>{{ version.published_at.date().isoformat() }}</dd></div>
+      <div><dt>License</dt><dd>{{ paper.license }}</dd></div>
+      <div><dt>DOI</dt><dd>{% if registered_doi %}<a href="https://doi.org/{{ registered_doi }}">{{ registered_doi }}</a>{% elif doi_record and doi_record.doi %}{{ doi_record.doi }} ({{ doi_record.environment }} {{ doi_record.state }}){% else %}Not registered{% endif %}</dd></div>
+      <div><dt>Manuscript checksum</dt><dd>{{ version.manuscript_checksum or 'No manuscript' }}</dd></div>
+    </dl>
+    <div class="actions">
+      {% if version.manuscript_uri %}<a href="{{ url_for('papers.version_pdf', identifier=paper.identifier, number=version.number) }}">View PDF</a>{% endif %}
+      <a href="{{ url_for('server.frontend') }}#paper={{ paper.identifier|urlencode }}">Open in PeerXiv</a>
+      {% if doi_record and doi_record.provider_record_url %}<a href="{{ doi_record.provider_record_url }}">View preservation record</a>{% endif %}
+    </div>
+  </main>
+</body>
+</html>

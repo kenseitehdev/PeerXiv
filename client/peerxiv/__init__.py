@@ -66,6 +66,7 @@ def create_app(config_name: str | None = None, config_overrides: dict | None = N
     # Importing the model registry makes all SQLAlchemy metadata visible to
     # Flask-Migrate before Alembic compares the database and model schemas.
     from . import models as _models  # noqa: F401
+    from accounts.cli import invites
     from discovery.cou_classifier import CoUPaperClassifierBackend
     from .classifier import classifier
     from .errors import register_error_handlers
@@ -73,6 +74,7 @@ def create_app(config_name: str | None = None, config_overrides: dict | None = N
     from .urls import register_urls
 
     classifier.register(CoUPaperClassifierBackend())
+    app.cli.add_command(invites)
     register_urls(app)
     register_error_handlers(app)
     register_socket_handlers()

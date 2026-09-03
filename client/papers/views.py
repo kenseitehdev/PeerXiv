@@ -2,7 +2,7 @@ import json
 import re
 from urllib.parse import urlsplit
 
-from flask import current_app, g, jsonify, redirect, request, send_file
+from flask import current_app, g, jsonify, redirect, request, send_file, url_for
 
 from accounts.auth import current_account, require_auth
 from accounts.services import (
@@ -20,8 +20,14 @@ from peerxiv.extensions import db, limiter
 from peerxiv.malware import MalwareDetected, MalwareScannerUnavailable
 
 from . import blueprint
+from .doi import (
+    DoiWorkflowError,
+    prepare_doi_record,
+    publish_zenodo_doi,
+    reserve_zenodo_doi,
+)
 from .manuscripts import InvalidManuscript, resolve_local_pdf, store_pdf
-from .schemas import PaperCreate, PaperPublish
+from .schemas import DoiPublishInput, DoiReserveInput, PaperCreate, PaperPublish
 from .services import create_draft, get_paper, list_papers, publish_paper
 
 
@@ -297,6 +303,130 @@ def metadata(identifier: str):
     return jsonify(record.to_dict())
 
 
+def _doi_error(error: DoiWorkflowError):
+    return jsonify({"error": {"code": error.code, "message": str(error)}}), error.status
+
+
+def _owned_paper(identifier: str):
+    paper = get_paper(identifier)
+    if paper is None:
+        raise DoiWorkflowError("paper_not_found", "Paper not found", status=404)
+    if paper.owner_id != g.current_account.id:
+        raise DoiWorkflowError("paper_forbidden", "You do not own this paper", status=403)
+    return paper
+
+
+@blueprint.get("/<identifier>/doi")
+def doi_status(identifier: str):
+    paper = get_paper(identifier)
+    if paper is None or paper.status != "published":
+        return jsonify({"error": {"code": "paper_not_found", "message": "Paper not found"}}), 404
+    version = paper.versions[-1] if paper.versions else None
+    return jsonify(
+        {
+            "paper": paper.identifier,
+            "version": version.number if version else None,
+            "record": version.doi_record.to_dict() if version and version.doi_record else None,
+        }
+    )
+
+
+@blueprint.post("/<identifier>/doi/prepare")
+@require_auth
+@limiter.limit("20 per hour")
+def prepare_doi(identifier: str):
+    try:
+        paper = _owned_paper(identifier)
+        version = paper.versions[-1] if paper.versions else None
+        landing_url = url_for(
+            "server.paper_landing",
+            identifier=paper.identifier,
+            number=version.number if version else 1,
+            _external=True,
+            _scheme="https" if current_app.config["ENVIRONMENT"] == "production" else None,
+        )
+        record = prepare_doi_record(
+            paper, actor_id=g.current_account.id, landing_url=landing_url
+        )
+        record_activity(
+            g.current_account.id,
+            verb="prepared",
+            object_type="doi",
+            object_id=record.id,
+            summary=f"{g.current_account.display_name} prepared DOI metadata for {paper.title}",
+            payload={"paper": paper.identifier, "version": version.number},
+        )
+        db.session.commit()
+        return jsonify(record.to_dict(include_error=True))
+    except DoiWorkflowError as error:
+        return _doi_error(error)
+
+
+@blueprint.post("/<identifier>/doi/reserve")
+@require_auth
+@limiter.limit("10 per hour")
+def reserve_doi(identifier: str):
+    payload = DoiReserveInput.model_validate(request.get_json(silent=True) or {})
+    if not payload.no_existing_doi:
+        return jsonify(
+            {
+                "error": {
+                    "code": "existing_doi_confirmation_required",
+                    "message": "Confirm that this exact paper version does not already have a DOI",
+                }
+            }
+        ), 400
+    try:
+        paper = _owned_paper(identifier)
+        version = paper.versions[-1] if paper.versions else None
+        if version is None or version.doi_record is None:
+            raise DoiWorkflowError(
+                "doi_metadata_not_prepared", "Prepare and inspect DOI metadata first", status=409
+            )
+        record = reserve_zenodo_doi(version.doi_record, actor_id=g.current_account.id)
+        record_activity(
+            g.current_account.id,
+            verb="reserved",
+            object_type="doi",
+            object_id=record.doi or record.id,
+            summary=f"{g.current_account.display_name} reserved {record.doi} for {paper.title}",
+            payload={"paper": paper.identifier, "version": version.number},
+        )
+        db.session.commit()
+        return jsonify(record.to_dict(include_error=True))
+    except DoiWorkflowError as error:
+        return _doi_error(error)
+
+
+@blueprint.post("/<identifier>/doi/publish")
+@require_auth
+@limiter.limit("5 per hour")
+def publish_doi(identifier: str):
+    payload = DoiPublishInput.model_validate(request.get_json(silent=True) or {})
+    try:
+        paper = _owned_paper(identifier)
+        version = paper.versions[-1] if paper.versions else None
+        if version is None or version.doi_record is None:
+            raise DoiWorkflowError("doi_not_reserved", "No DOI is reserved", status=409)
+        record = publish_zenodo_doi(
+            version.doi_record,
+            actor_id=g.current_account.id,
+            confirmation=payload.confirmation,
+        )
+        record_activity(
+            g.current_account.id,
+            verb="published",
+            object_type="doi",
+            object_id=record.doi or record.id,
+            summary=f"{g.current_account.display_name} published DOI {record.doi}",
+            payload={"paper": paper.identifier, "version": version.number},
+        )
+        db.session.commit()
+        return jsonify(record.to_dict(include_error=True))
+    except DoiWorkflowError as error:
+        return _doi_error(error)
+
+
 @blueprint.get("/<identifier>/pdf")
 def pdf(identifier: str):
     paper = get_paper(identifier)
@@ -307,6 +437,27 @@ def pdf(identifier: str):
             {"error": {"code": "pdf_not_available", "message": "No PDF is attached"}}
         ), 404
     version = paper.versions[-1]
+    return _send_version_pdf(paper, version)
+
+
+@blueprint.get("/<identifier>/versions/<int:number>/pdf")
+def version_pdf(identifier: str, number: int):
+    paper = get_paper(identifier)
+    if paper is None or paper.status != "published":
+        return jsonify({"error": {"code": "paper_not_found", "message": "Paper not found"}}), 404
+    version = next((item for item in paper.versions if item.number == number), None)
+    if version is None:
+        return jsonify(
+            {"error": {"code": "paper_version_not_found", "message": "Paper version not found"}}
+        ), 404
+    if not version.manuscript_uri:
+        return jsonify(
+            {"error": {"code": "pdf_not_available", "message": "No PDF is attached"}}
+        ), 404
+    return _send_version_pdf(paper, version)
+
+
+def _send_version_pdf(paper, version):
     uri = version.manuscript_uri
     local_path = resolve_local_pdf(uri, current_app.config["MANUSCRIPT_STORAGE_ROOT"])
     if local_path is not None:

@@ -12,3 +12,4 @@ python-dotenv>=1.1,<2
 simple-websocket>=1.1,<2
 gunicorn>=23,<24
 pypdf>=6.15,<7
+cryptography>=46,<47
